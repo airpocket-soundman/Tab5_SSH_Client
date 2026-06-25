@@ -126,6 +126,9 @@ constexpr Rect FontMinusBtn{8, HeaderH + ContentTopGap, 112, 48};
 constexpr Rect FontPlusBtn{132, HeaderH + ContentTopGap, 112, 48};
 constexpr Rect FontSaveBtn{256, HeaderH + ContentTopGap, 150, 48};
 
+bool connectSshProfile(const SshProfile& profile);
+bool parseSshCommand(const String& line, SshProfile& profile, String& error);
+
 bool headerButtonContains(const Rect& r, int px, int py)
 {
     return px >= r.x && px < r.x + r.w && py >= 0 && py < HeaderTouchH;
@@ -497,24 +500,53 @@ void browseCommandHistory(int delta)
     dirty = true;
 }
 
+void rememberCommandHistory(const String& line)
+{
+    if (!line.length()) {
+        return;
+    }
+    if (commandHistory.empty() || commandHistory.back() != line) {
+        commandHistory.push_back(line);
+        if (commandHistory.size() > 50) {
+            commandHistory.erase(commandHistory.begin());
+        }
+    }
+    commandHistoryIndex = commandHistory.size();
+}
+
+void executeLocalCommand()
+{
+    String line = commandLine;
+    line.trim();
+    terminal.append(String("tab5$ ") + line + "\n");
+    rememberCommandHistory(line);
+    resetCommandEditor();
+
+    if (!line.length()) {
+        dirty = true;
+        return;
+    }
+
+    SshProfile directProfile;
+    String error;
+    if (parseSshCommand(line, directProfile, error)) {
+        connectSshProfile(directProfile);
+    } else {
+        terminal.append(error + "\n");
+    }
+    dirty = true;
+}
+
 void sendCommandLine()
 {
     if (!ssh.connected()) {
-        resetCommandEditor();
-        dirty = true;
+        executeLocalCommand();
         return;
     }
     String line = commandLine;
     String payload = line + "\n";
     ssh.write(reinterpret_cast<const uint8_t*>(payload.c_str()), payload.length());
-    if (line.length()) {
-        if (commandHistory.empty() || commandHistory.back() != line) {
-            commandHistory.push_back(line);
-            if (commandHistory.size() > 50) {
-                commandHistory.erase(commandHistory.begin());
-            }
-        }
-    }
+    rememberCommandHistory(line);
     resetCommandEditor();
     dirty = true;
 }
@@ -927,6 +959,115 @@ void connectActiveSsh()
     }
 }
 
+bool connectSshProfile(const SshProfile& profile)
+{
+    ssh.disconnect();
+    String err;
+    appendStatus(String("Connecting SSH: ") + profile.user + "@" + profile.host);
+    setCrashStage("ssh.connect.direct");
+    if (ssh.connect(profile, err)) {
+        setCrashStage("ssh.connected");
+        resetCommandEditor();
+        vt.reset();
+        configureTerminal();
+        appendStatus("SSH connected");
+        screen = Screen::Terminal;
+        return true;
+    }
+    setCrashStage("ssh.failed");
+    appendStatus(String("SSH failed: ") + err);
+    return false;
+}
+
+void inheritSavedSshCredentials(SshProfile& profile)
+{
+    for (const auto& saved : config.ssh) {
+        if (saved.host == profile.host && saved.user == profile.user && saved.port == profile.port) {
+            profile.password = saved.password;
+            profile.terminal = saved.terminal.length() ? saved.terminal : "xterm-256color";
+            return;
+        }
+    }
+    for (const auto& saved : config.ssh) {
+        if (saved.host == profile.host && saved.user == profile.user) {
+            profile.password = saved.password;
+            profile.terminal = saved.terminal.length() ? saved.terminal : "xterm-256color";
+            return;
+        }
+    }
+}
+
+bool parseSshCommand(const String& line, SshProfile& profile, String& error)
+{
+    String rest = line;
+    rest.trim();
+    if (!rest.startsWith("ssh ")) {
+        error = "Command not found";
+        return false;
+    }
+    rest = rest.substring(4);
+    rest.trim();
+    if (!rest.length()) {
+        error = "Usage: ssh [-p port] user@host";
+        return false;
+    }
+
+    profile = SshProfile{};
+    profile.port = 22;
+    profile.terminal = "xterm-256color";
+
+    int pIndex = rest.indexOf("-p ");
+    if (pIndex >= 0) {
+        String before = rest.substring(0, pIndex);
+        String after = rest.substring(pIndex + 3);
+        before.trim();
+        after.trim();
+        int nextSpace = after.indexOf(' ');
+        String portText = nextSpace >= 0 ? after.substring(0, nextSpace) : after;
+        if (!portText.length() || portText.toInt() <= 0 || portText.toInt() > 65535) {
+            error = "Invalid SSH port";
+            return false;
+        }
+        profile.port = static_cast<uint16_t>(portText.toInt());
+        String remaining = nextSpace >= 0 ? after.substring(nextSpace + 1) : "";
+        remaining.trim();
+        rest = before.length() ? before : remaining;
+        rest.trim();
+    }
+
+    int space = rest.indexOf(' ');
+    if (space >= 0) {
+        rest = rest.substring(0, space);
+    }
+    int at = rest.indexOf('@');
+    if (at <= 0 || at >= static_cast<int>(rest.length()) - 1) {
+        error = "Usage: ssh [-p port] user@host";
+        return false;
+    }
+    profile.user = rest.substring(0, at);
+    profile.host = rest.substring(at + 1);
+    int colon = profile.host.lastIndexOf(':');
+    if (colon > 0 && colon < static_cast<int>(profile.host.length()) - 1) {
+        String portText = profile.host.substring(colon + 1);
+        bool numeric = true;
+        for (size_t i = 0; i < portText.length(); ++i) {
+            numeric = numeric && std::isdigit(static_cast<unsigned char>(portText[i]));
+        }
+        if (numeric) {
+            int port = portText.toInt();
+            if (port <= 0 || port > 65535) {
+                error = "Invalid SSH port";
+                return false;
+            }
+            profile.port = static_cast<uint16_t>(port);
+            profile.host = profile.host.substring(0, colon);
+        }
+    }
+    profile.name = String("direct ") + profile.user + "@" + profile.host;
+    inheritSavedSshCredentials(profile);
+    return true;
+}
+
 String safeValue(const String& value, bool secret = false)
 {
     if (!secret) {
@@ -998,13 +1139,14 @@ void drawTerminal()
     setTerminalFont();
     screenSprite.setTextColor(TFT_GREEN, TFT_BLACK);
     const int lineStep = terminalLineStep();
-    const bool drawEditor = ssh.connected() && terminal.atBottom();
+    const bool drawEditor = terminal.atBottom();
     for (size_t row = 0; row < terminal.viewportRows(); ++row) {
         String line = terminal.lineAt(row);
         if (drawEditor && row + 1 == terminal.viewportRows()) {
             int lineTop = HeaderH + static_cast<int>(row) * lineStep;
             clampCommandCursor();
-            String prefix = line + commandLine.substring(0, commandCursor);
+            const String prompt = "tab5$ ";
+            String prefix = prompt + commandLine.substring(0, commandCursor);
             String cursorGlyph = " ";
             String suffix = "";
             if (commandCursor < commandLine.length()) {
@@ -1959,12 +2101,50 @@ bool handleWifiContentAction(const KeyAction& action)
     return false;
 }
 
+void handleDisconnectedTerminalText(const KeyAction& action)
+{
+    if (isEnterKey(action)) {
+        executeLocalCommand();
+        return;
+    }
+    if (isLeftKey(action)) {
+        moveCommandCursor(-1);
+        return;
+    }
+    if (isRightKey(action)) {
+        moveCommandCursor(1);
+        return;
+    }
+    if (isUpKey(action)) {
+        browseCommandHistory(-1);
+        return;
+    }
+    if (isDownKey(action)) {
+        browseCommandHistory(1);
+        return;
+    }
+    if (isTabKey(action)) {
+        return;
+    }
+
+    for (size_t i = 0; i < action.text.length(); ++i) {
+        char c = action.text[i];
+        if (c == 0x08 || c == 0x7F) {
+            backspaceCommandText();
+        } else if (std::isprint(static_cast<unsigned char>(c))) {
+            insertCommandText(String(c));
+        }
+    }
+}
+
 void handleTerminalAction(const KeyAction& action)
 {
     switch (action.type) {
         case KeyActionType::Text:
             if (ssh.connected()) {
                 sendSshText(action.text);
+            } else {
+                handleDisconnectedTerminalText(action);
             }
             dirty = true;
             break;
@@ -2390,11 +2570,15 @@ void loop()
     pollWifiScan();
     pollSsh();
 
-    if (screen == Screen::Terminal && ssh.connected() && millis() - lastCursorBlink >= 500) {
+    if (screen == Screen::Terminal && millis() - lastCursorBlink >= 500) {
         lastCursorBlink = millis();
-        vt.markCursorDirty();
+        if (ssh.connected()) {
+            vt.markCursorDirty();
+        }
         cursorVisible = !cursorVisible;
-        vt.markCursorDirty();
+        if (ssh.connected()) {
+            vt.markCursorDirty();
+        }
         dirty = true;
     }
 
