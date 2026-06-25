@@ -368,6 +368,65 @@ uint8_t utf8CharLength(uint8_t c)
     return 1;
 }
 
+uint32_t utf8Codepoint(const String& text)
+{
+    if (!text.length()) return 0;
+    const uint8_t c0 = static_cast<uint8_t>(text[0]);
+    if (c0 < 0x80) return c0;
+    if ((c0 & 0xE0) == 0xC0 && text.length() >= 2) {
+        return ((c0 & 0x1F) << 6) | (static_cast<uint8_t>(text[1]) & 0x3F);
+    }
+    if ((c0 & 0xF0) == 0xE0 && text.length() >= 3) {
+        return ((c0 & 0x0F) << 12) |
+               ((static_cast<uint8_t>(text[1]) & 0x3F) << 6) |
+               (static_cast<uint8_t>(text[2]) & 0x3F);
+    }
+    if ((c0 & 0xF8) == 0xF0 && text.length() >= 4) {
+        return ((c0 & 0x07) << 18) |
+               ((static_cast<uint8_t>(text[1]) & 0x3F) << 12) |
+               ((static_cast<uint8_t>(text[2]) & 0x3F) << 6) |
+               (static_cast<uint8_t>(text[3]) & 0x3F);
+    }
+    return c0;
+}
+
+bool drawBlockGlyph(uint32_t cp, int x, int y, int w, int h, uint16_t fg, uint16_t bg)
+{
+    if (cp == 0x2588 || cp == 0x2589 || cp == 0x258A || cp == 0x258B ||
+        cp == 0x258C || cp == 0x258D || cp == 0x258E || cp == 0x258F) {
+        int fillW = w;
+        if (cp >= 0x2589) {
+            fillW = max<int>(1, (w * static_cast<int>(0x2590 - cp)) / 8);
+        }
+        screenSprite.fillRect(x, y, fillW, h, fg);
+        return true;
+    }
+    if (cp == 0x2580) {
+        screenSprite.fillRect(x, y, w, max<int>(1, h / 2), fg);
+        return true;
+    }
+    if (cp == 0x2584) {
+        int half = max<int>(1, h / 2);
+        screenSprite.fillRect(x, y + h - half, w, half, fg);
+        return true;
+    }
+    if (cp == 0x2590) {
+        screenSprite.fillRect(x + w / 2, y, max<int>(1, w - w / 2), h, fg);
+        return true;
+    }
+    if (cp == 0x2591 || cp == 0x2592 || cp == 0x2593) {
+        int step = cp == 0x2591 ? 4 : (cp == 0x2592 ? 3 : 2);
+        for (int yy = 0; yy < h; ++yy) {
+            for (int xx = (yy % step); xx < w; xx += step) {
+                screenSprite.drawPixel(x + xx, y + yy, fg);
+            }
+        }
+        return true;
+    }
+    (void)bg;
+    return false;
+}
+
 void drawMixedTerminalLine(const String& line, int x, int lineTop, int lineHeight)
 {
     if (!hasJapaneseBytes(line)) {
@@ -430,6 +489,10 @@ void drawVtTerminal()
             }
             screenSprite.fillRect(x, y, cellW, lineStep, bg);
             if (cell.ch != " ") {
+                uint32_t cp = utf8Codepoint(cell.ch);
+                if (drawBlockGlyph(cp, x, y, cellW, lineStep, fg, bg)) {
+                    continue;
+                }
                 bool japanese = static_cast<uint8_t>(cell.ch[0]) >= 0x80;
                 screenSprite.setFont(japanese ? terminalFont().japaneseFont : terminalFont().font);
                 screenSprite.setTextSize(1);
