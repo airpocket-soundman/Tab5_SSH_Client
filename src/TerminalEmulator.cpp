@@ -4,7 +4,19 @@
 #include <cstdlib>
 
 namespace {
-TerminalEmulator::Cell BlankCell(uint8_t fg = 7, uint8_t bg = 0)
+constexpr uint32_t DirectColorFlag = 0x01000000UL;
+
+uint16_t rgb565(uint8_t r, uint8_t g, uint8_t b)
+{
+    return static_cast<uint16_t>(((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3));
+}
+
+uint32_t directColor(uint8_t r, uint8_t g, uint8_t b)
+{
+    return DirectColorFlag | rgb565(r, g, b);
+}
+
+TerminalEmulator::Cell BlankCell(uint32_t fg = 7, uint32_t bg = 0)
 {
     TerminalEmulator::Cell cell;
     cell.ch = " ";
@@ -493,12 +505,26 @@ void TerminalEmulator::executeCsi(char command)
                 else if (p == 7) _inverse = true;
                 else if (p == 22) _bold = false;
                 else if (p == 27) _inverse = false;
-                else if (p >= 30 && p <= 37) _fg = static_cast<uint8_t>(p - 30);
+                else if (p >= 30 && p <= 37) _fg = static_cast<uint32_t>(p - 30);
                 else if (p == 39) _fg = 7;
-                else if (p >= 40 && p <= 47) _bg = static_cast<uint8_t>(p - 40);
+                else if (p >= 40 && p <= 47) _bg = static_cast<uint32_t>(p - 40);
                 else if (p == 49) _bg = 0;
-                else if (p >= 90 && p <= 97) _fg = static_cast<uint8_t>(p - 90 + 8);
-                else if (p >= 100 && p <= 107) _bg = static_cast<uint8_t>(p - 100 + 8);
+                else if (p >= 90 && p <= 97) _fg = static_cast<uint32_t>(p - 90 + 8);
+                else if (p >= 100 && p <= 107) _bg = static_cast<uint32_t>(p - 100 + 8);
+                else if ((p == 38 || p == 48) && i + 2 < _params.size() && _params[i + 1] == 5) {
+                    uint32_t color = static_cast<uint32_t>(std::max(0, std::min(255, _params[i + 2])));
+                    if (p == 38) _fg = color;
+                    else _bg = color;
+                    i += 2;
+                } else if ((p == 38 || p == 48) && i + 4 < _params.size() && _params[i + 1] == 2) {
+                    uint8_t r = static_cast<uint8_t>(std::max(0, std::min(255, _params[i + 2])));
+                    uint8_t g = static_cast<uint8_t>(std::max(0, std::min(255, _params[i + 3])));
+                    uint8_t b = static_cast<uint8_t>(std::max(0, std::min(255, _params[i + 4])));
+                    uint32_t color = directColor(r, g, b);
+                    if (p == 38) _fg = color;
+                    else _bg = color;
+                    i += 4;
+                }
             }
             break;
         case 'r':

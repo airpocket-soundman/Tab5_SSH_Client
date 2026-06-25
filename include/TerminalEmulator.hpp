@@ -7,8 +7,8 @@ class TerminalEmulator {
 public:
     struct Cell {
         String ch{" "};
-        uint8_t fg{7};
-        uint8_t bg{0};
+        uint32_t fg{7};
+        uint32_t bg{0};
         bool bold{false};
         bool inverse{false};
         bool dirty{true};
@@ -74,8 +74,8 @@ private:
     size_t _cursorRow{0};
     size_t _savedCol{0};
     size_t _savedRow{0};
-    uint8_t _fg{7};
-    uint8_t _bg{0};
+    uint32_t _fg{7};
+    uint32_t _bg{0};
     bool _bold{false};
     bool _inverse{false};
     bool _wrapPending{false};

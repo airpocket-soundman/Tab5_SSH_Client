@@ -258,7 +258,12 @@ int terminalFontHeight(bool japanese)
     return screenSprite.fontHeight();
 }
 
-uint16_t ansiColor(uint8_t color, bool bold)
+uint16_t rgb565(uint8_t r, uint8_t g, uint8_t b)
+{
+    return static_cast<uint16_t>(((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3));
+}
+
+uint16_t terminalColor(uint32_t color, bool bold)
 {
     static const uint16_t normal[] = {
         TFT_BLACK, TFT_MAROON, TFT_DARKGREEN, TFT_OLIVE,
@@ -266,7 +271,31 @@ uint16_t ansiColor(uint8_t color, bool bold)
         TFT_DARKGREY, TFT_RED, TFT_GREEN, TFT_YELLOW,
         TFT_BLUE, TFT_MAGENTA, TFT_CYAN, TFT_WHITE
     };
-    uint8_t index = color & 0x0F;
+    if (color & 0x01000000UL) {
+        return static_cast<uint16_t>(color & 0xFFFF);
+    }
+    if (color < 16) {
+        uint8_t index = static_cast<uint8_t>(color & 0x0F);
+        if (bold && index < 8) {
+            index += 8;
+        }
+        return normal[index];
+    }
+    if (color >= 16 && color <= 231) {
+        uint32_t c = color - 16;
+        uint8_t r = static_cast<uint8_t>(c / 36);
+        uint8_t g = static_cast<uint8_t>((c / 6) % 6);
+        uint8_t b = static_cast<uint8_t>(c % 6);
+        auto level = [](uint8_t v) -> uint8_t {
+            return v == 0 ? 0 : static_cast<uint8_t>(55 + v * 40);
+        };
+        return rgb565(level(r), level(g), level(b));
+    }
+    if (color >= 232 && color <= 255) {
+        uint8_t level = static_cast<uint8_t>(8 + (color - 232) * 10);
+        return rgb565(level, level, level);
+    }
+    uint8_t index = static_cast<uint8_t>(color & 0x0F);
     if (bold && index < 8) {
         index += 8;
     }
@@ -393,8 +422,8 @@ void drawVtTerminal()
                 continue;
             }
             bool inverse = cell.inverse ^ cursor;
-            uint16_t fg = ansiColor(cell.fg, cell.bold);
-            uint16_t bg = ansiColor(cell.bg, false);
+            uint16_t fg = terminalColor(cell.fg, cell.bold);
+            uint16_t bg = terminalColor(cell.bg, false);
             if (inverse) {
                 std::swap(fg, bg);
             }
