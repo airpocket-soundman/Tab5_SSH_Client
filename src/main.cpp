@@ -466,6 +466,15 @@ void drawVtTerminal()
 {
     const int cellW = terminalCellWidth();
     const int lineStep = terminalLineStep();
+    const int gridRight = 4 + static_cast<int>(vt.columns()) * cellW;
+    const int gridBottom = HeaderH + static_cast<int>(vt.rows()) * lineStep;
+    if (gridRight < screenSprite.width()) {
+        screenSprite.fillRect(gridRight, HeaderH, screenSprite.width() - gridRight,
+                              max<int>(0, min<int>(screenSprite.height(), gridBottom) - HeaderH), TFT_BLACK);
+    }
+    if (gridBottom < screenSprite.height()) {
+        screenSprite.fillRect(0, gridBottom, screenSprite.width(), screenSprite.height() - gridBottom, TFT_BLACK);
+    }
     for (size_t row = 0; row < vt.rows(); ++row) {
         int y = HeaderH + static_cast<int>(row) * lineStep;
         if (y >= screenSprite.height()) {
