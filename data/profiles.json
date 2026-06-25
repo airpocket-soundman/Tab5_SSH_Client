@@ -1,0 +1,33 @@
+{
+  "wifi": [
+    {
+      "name": "home",
+      "ssid": "YOUR_WIFI_SSID",
+      "password": "YOUR_WIFI_PASSWORD"
+    }
+  ],
+  "ssh": [
+    {
+      "name": "local-server",
+      "host": "192.168.1.10",
+      "port": 22,
+      "user": "pi",
+      "password": "raspberry",
+      "terminal": "xterm-256color"
+    },
+    {
+      "name": "tailscale-server",
+      "host": "server.tailnet-name.ts.net",
+      "port": 22,
+      "user": "user",
+      "password": "",
+      "terminal": "xterm-256color"
+    }
+  ],
+  "keyboard": {
+    "layout": "us",
+    "terminalFont": "mono12",
+    "terminalLineStep": 15,
+    "swapCtrlCaps": false
+  }
+}
