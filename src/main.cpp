@@ -2,6 +2,7 @@
 #include "SshClient.hpp"
 #include "Tab5KeyboardInput.hpp"
 #include "TerminalBuffer.hpp"
+#include "TerminalEmulator.hpp"
 #include "WifiProfiles.hpp"
 
 #include <M5Unified.h>
@@ -18,6 +19,7 @@ WifiProfiles wifiProfiles;
 SshClient ssh;
 Tab5KeyboardInput keyboard;
 TerminalBuffer terminal(2500);
+TerminalEmulator vt;
 M5Canvas screenSprite(&M5.Display);
 bool screenSpriteReady = false;
 
@@ -248,6 +250,21 @@ int terminalFontHeight(bool japanese)
     return screenSprite.fontHeight();
 }
 
+uint16_t ansiColor(uint8_t color, bool bold)
+{
+    static const uint16_t normal[] = {
+        TFT_BLACK, TFT_MAROON, TFT_DARKGREEN, TFT_OLIVE,
+        TFT_NAVY, TFT_PURPLE, TFT_DARKCYAN, TFT_LIGHTGREY,
+        TFT_DARKGREY, TFT_RED, TFT_GREEN, TFT_YELLOW,
+        TFT_BLUE, TFT_MAGENTA, TFT_CYAN, TFT_WHITE
+    };
+    uint8_t index = color & 0x0F;
+    if (bold && index < 8) {
+        index += 8;
+    }
+    return normal[index];
+}
+
 void migrateLegacyLineStep()
 {
     const auto& font = terminalFont();
@@ -346,6 +363,47 @@ void drawMixedTerminalLine(const String& line, int x, int lineTop, int lineHeigh
         screenSprite.drawString(part, cursorX, y);
         cursorX += screenSprite.textWidth(part);
     }
+}
+
+void drawVtTerminal()
+{
+    const int cellW = terminalCellWidth();
+    const int lineStep = terminalLineStep();
+    for (size_t row = 0; row < vt.rows(); ++row) {
+        int y = HeaderH + static_cast<int>(row) * lineStep;
+        if (y >= screenSprite.height()) {
+            break;
+        }
+        for (size_t col = 0; col < vt.columns(); ++col) {
+            int x = 4 + static_cast<int>(col) * cellW;
+            if (x >= screenSprite.width()) {
+                break;
+            }
+            const auto& cell = vt.cell(col, row);
+            bool cursor = vt.cursorVisible() && cursorVisible && col == vt.cursorColumn() && row == vt.cursorRow();
+            if (!cell.dirty && !cursor) {
+                continue;
+            }
+            bool inverse = cell.inverse ^ cursor;
+            uint16_t fg = ansiColor(cell.fg, cell.bold);
+            uint16_t bg = ansiColor(cell.bg, false);
+            if (inverse) {
+                std::swap(fg, bg);
+            }
+            screenSprite.fillRect(x, y, cellW, lineStep, bg);
+            if (cell.ch != " ") {
+                bool japanese = static_cast<uint8_t>(cell.ch[0]) >= 0x80;
+                screenSprite.setFont(japanese ? terminalFont().japaneseFont : terminalFont().font);
+                screenSprite.setTextSize(1);
+                screenSprite.setTextColor(fg, bg);
+                int textY = y + max<int>(0, (lineStep - screenSprite.fontHeight()) / 2);
+                screenSprite.drawString(cell.ch, x, textY);
+            }
+        }
+    }
+    setTerminalFont();
+    screenSprite.setTextColor(TFT_GREEN, TFT_BLACK);
+    vt.clearDirty();
 }
 
 void resetCommandEditor()
@@ -576,6 +634,10 @@ void configureTerminal()
     const size_t columns = max<int>(20, (screenSprite.width() - 8) / terminalCellWidth());
     size_t rows = max<int>(5, (screenSprite.height() - HeaderH - 4) / terminalLineStep());
     terminal.setViewport(columns, rows);
+    vt.resize(columns, rows);
+    if (ssh.connected()) {
+        ssh.resizePty(static_cast<int>(columns), static_cast<int>(rows));
+    }
 }
 
 void appendStatus(const String& message)
@@ -855,6 +917,7 @@ void connectActiveSsh()
     if (ssh.connect(config.ssh[activeSsh], err)) {
         setCrashStage("ssh.connected");
         resetCommandEditor();
+        vt.reset();
         configureTerminal();
         appendStatus("SSH connected");
         screen = Screen::Terminal;
@@ -928,6 +991,10 @@ void setSshFieldValue(uint8_t field, const String& value)
 
 void drawTerminal()
 {
+    if (ssh.connected()) {
+        drawVtTerminal();
+        return;
+    }
     setTerminalFont();
     screenSprite.setTextColor(TFT_GREEN, TFT_BLACK);
     const int lineStep = terminalLineStep();
@@ -1126,7 +1193,9 @@ void drawFontList()
 void draw()
 {
     screenSprite.startWrite();
-    screenSprite.fillScreen(TFT_BLACK);
+    if (!(screen == Screen::Terminal && ssh.connected())) {
+        screenSprite.fillScreen(TFT_BLACK);
+    }
     setUiFont();
     drawHeader();
 
@@ -1895,42 +1964,7 @@ void handleTerminalAction(const KeyAction& action)
     switch (action.type) {
         case KeyActionType::Text:
             if (ssh.connected()) {
-                if (remoteLineMode) {
-                    sendSshText(action.text);
-                    if (isEnterKey(action)) {
-                        remoteLineMode = false;
-                        resetCommandEditor();
-                    }
-                } else if (action.text == "\t") {
-                    String payload = commandLine.substring(0, commandCursor) + "\t" + commandLine.substring(commandCursor);
-                    if (sendSshText(payload)) {
-                        commandLine = "";
-                        commandCursor = 0;
-                        commandHistoryIndex = commandHistory.size();
-                        remoteLineMode = true;
-                        cursorVisible = true;
-                        lastCursorBlink = millis();
-                    }
-                } else if (isEnterKey(action)) {
-                    sendCommandLine();
-                } else if (isLeftKey(action)) {
-                    moveCommandCursor(-1);
-                } else if (isRightKey(action)) {
-                    moveCommandCursor(1);
-                } else if (isUpKey(action)) {
-                    browseCommandHistory(-1);
-                } else if (isDownKey(action)) {
-                    browseCommandHistory(1);
-                } else {
-                    for (size_t i = 0; i < action.text.length(); ++i) {
-                        char c = action.text[i];
-                        if (c == 0x08 || c == 0x7F) {
-                            backspaceCommandText();
-                        } else if (static_cast<uint8_t>(c) >= 0x20) {
-                            insertCommandText(String(c));
-                        }
-                    }
-                }
+                sendSshText(action.text);
             }
             dirty = true;
             break;
@@ -2053,10 +2087,7 @@ void pollSsh()
     int n = ssh.read(buffer, sizeof(buffer));
     if (n > 0) {
         setCrashStage("ssh.append");
-        terminal.append(buffer, static_cast<size_t>(n));
-        if (terminal.atBottom()) {
-            terminal.scrollToBottom();
-        }
+        vt.write(buffer, static_cast<size_t>(n));
         dirty = true;
     } else if (n < 0) {
         setCrashStage("ssh.read.error");
@@ -2079,7 +2110,9 @@ void serialPrintHelp()
     Serial.println("  ssh active <index>");
     Serial.println("  ssh connect [index]");
     Serial.println("  ssh send <text>");
+    Serial.println("  ssh raw <hex bytes>");
     Serial.println("  ssh disconnect");
+    Serial.println("  term dump");
 }
 
 void serialPrintStatus()
@@ -2108,6 +2141,68 @@ void serialPrintSshProfiles()
                       static_cast<unsigned>(p.port),
                       p.terminal.c_str());
     }
+}
+
+void serialDumpTerminal()
+{
+    Serial.printf("term cols=%u rows=%u cursor=%u,%u alt=%u\r\n",
+                  static_cast<unsigned>(vt.columns()),
+                  static_cast<unsigned>(vt.rows()),
+                  static_cast<unsigned>(vt.cursorColumn()),
+                  static_cast<unsigned>(vt.cursorRow()),
+                  vt.alternateScreen() ? 1 : 0);
+    for (size_t row = 0; row < vt.rows(); ++row) {
+        String line;
+        line.reserve(vt.columns());
+        for (size_t col = 0; col < vt.columns(); ++col) {
+            String ch = vt.cell(col, row).ch;
+            if (ch.length() == 1 && static_cast<uint8_t>(ch[0]) >= 0x20 && static_cast<uint8_t>(ch[0]) < 0x7F) {
+                line += ch;
+            } else if (ch == " ") {
+                line += ' ';
+            } else {
+                line += '?';
+            }
+        }
+        while (line.endsWith(" ")) {
+            line.remove(line.length() - 1);
+        }
+        Serial.printf("%02u|%s\r\n", static_cast<unsigned>(row), line.c_str());
+    }
+}
+
+int hexNibble(char c)
+{
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
+}
+
+bool sendRawHex(const String& hex)
+{
+    uint8_t bytes[128];
+    size_t count = 0;
+    int high = -1;
+    for (size_t i = 0; i < hex.length(); ++i) {
+        int v = hexNibble(hex[i]);
+        if (v < 0) {
+            continue;
+        }
+        if (high < 0) {
+            high = v;
+        } else {
+            if (count >= sizeof(bytes)) {
+                return false;
+            }
+            bytes[count++] = static_cast<uint8_t>((high << 4) | v);
+            high = -1;
+        }
+    }
+    if (high >= 0 || count == 0 || !ssh.connected()) {
+        return false;
+    }
+    return ssh.write(bytes, count);
 }
 
 bool parseTrailingIndex(const String& command, size_t prefixLen, size_t& index)
@@ -2149,6 +2244,8 @@ void handleSerialCommand(String command)
                       WiFi.SSID().c_str());
     } else if (command == "ssh list") {
         serialPrintSshProfiles();
+    } else if (command == "term dump") {
+        serialDumpTerminal();
     } else if (command.startsWith("ssh active")) {
         size_t index = 0;
         if (!parseTrailingIndex(command, strlen("ssh active"), index) || index >= config.ssh.size()) {
@@ -2180,6 +2277,9 @@ void handleSerialCommand(String command)
         String payload = text + "\n";
         bool ok = ssh.write(reinterpret_cast<const uint8_t*>(payload.c_str()), payload.length());
         Serial.println(ok ? "OK sent" : "ERR ssh write failed");
+    } else if (command.startsWith("ssh raw ")) {
+        String hex = command.substring(strlen("ssh raw "));
+        Serial.println(sendRawHex(hex) ? "OK raw sent" : "ERR raw send failed");
     } else if (command == "ssh disconnect") {
         ssh.disconnect();
         resetCommandEditor();
@@ -2243,7 +2343,7 @@ void setup()
     cfg.serial_baudrate = 115200;
     M5.begin(cfg);
     M5.Display.setRotation(3);
-    M5.Display.setBrightness(180);
+    M5.Display.setBrightness(100);
     initScreenSprite();
     configureTerminal();
 
@@ -2292,7 +2392,9 @@ void loop()
 
     if (screen == Screen::Terminal && ssh.connected() && millis() - lastCursorBlink >= 500) {
         lastCursorBlink = millis();
+        vt.markCursorDirty();
         cursorVisible = !cursorVisible;
+        vt.markCursorDirty();
         dirty = true;
     }
 

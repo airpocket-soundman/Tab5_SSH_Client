@@ -143,3 +143,17 @@ bool SshClient::write(const uint8_t* data, size_t len)
     return false;
 #endif
 }
+
+bool SshClient::resizePty(int columns, int rows)
+{
+#if ENABLE_SSH
+    if (!connected()) {
+        return false;
+    }
+    return ssh_channel_change_pty_size(static_cast<ssh_channel>(_channel), columns, rows) == SSH_OK;
+#else
+    (void)columns;
+    (void)rows;
+    return false;
+#endif
+}

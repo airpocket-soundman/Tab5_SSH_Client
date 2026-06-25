@@ -89,6 +89,9 @@ KeyAction KeyboardMapper::mapHid(uint8_t modifier, uint8_t keycode) const
     if (keycode >= 0x1E && keycode <= 0x38) {
         const size_t index = keycode - 0x1E;
         if (index < strlen(normal)) {
+            if (ctrl && normal[index] == '[') {
+                return {KeyActionType::Text, String(static_cast<char>(0x1B)), 0};
+            }
             return {KeyActionType::Text, String(shift ? shifted[index] : normal[index]), 0};
         }
     }
