@@ -104,6 +104,7 @@ RTC_DATA_ATTR char crashStage[64] = "";
 constexpr bool ForceFixedWifiForTest = false;
 constexpr const char* FixedWifiSsid = "kumakero2.4";
 constexpr const char* FixedWifiPassword = "4roses6126";
+constexpr const char* LocalPrompt = "[tab5]  ";
 
 constexpr int HeaderH = 44;
 constexpr int HeaderTouchH = HeaderH * 3;
@@ -552,7 +553,7 @@ void executeLocalCommand()
 {
     String line = commandLine;
     line.trim();
-    terminal.append(String("tab5$ ") + line + "\n");
+    terminal.append(String(LocalPrompt) + line + "\n");
     rememberCommandHistory(line);
     resetCommandEditor();
 
@@ -1179,8 +1180,7 @@ void drawTerminal()
         if (drawEditor && row + 1 == terminal.viewportRows()) {
             int lineTop = HeaderH + static_cast<int>(row) * lineStep;
             clampCommandCursor();
-            const String prompt = "tab5$ ";
-            String prefix = prompt + commandLine.substring(0, commandCursor);
+            String prefix = String(LocalPrompt) + commandLine.substring(0, commandCursor);
             String cursorGlyph = " ";
             String suffix = "";
             if (commandCursor < commandLine.length()) {
