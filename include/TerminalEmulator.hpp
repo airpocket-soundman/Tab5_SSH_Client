@@ -52,6 +52,11 @@ private:
     void scrollUp(size_t top, size_t bottom, size_t count);
     void clearRow(size_t row, size_t fromCol, size_t toCol);
     void clearCells();
+    void insertCells(size_t count);
+    void deleteCells(size_t count);
+    void insertLines(size_t count);
+    void deleteLines(size_t count);
+    void scrollDown(size_t top, size_t bottom, size_t count);
     void processByte(uint8_t c);
     void processEscape(uint8_t c);
     void processCsi(uint8_t c);
@@ -60,6 +65,7 @@ private:
     void parseParams();
     void setCursor(size_t row, size_t col);
     void markDirty(size_t col, size_t row);
+    void markDirtyWithNeighbors(size_t col, size_t row);
     Cell& mutableCell(size_t col, size_t row);
 
     size_t _cols{80};
@@ -75,6 +81,8 @@ private:
     bool _wrapPending{false};
     bool _alternate{false};
     bool _cursorVisible{true};
+    size_t _scrollTop{0};
+    size_t _scrollBottom{0};
     State _state{State::Ground};
     String _csi;
     String _osc;

@@ -7,7 +7,7 @@
 
 extern void tab5SetCrashStage(const char* stage);
 
-bool SshClient::connect(const SshProfile& profile, String& error)
+bool SshClient::connect(const SshProfile& profile, String& error, int columns, int rows)
 {
 #if ENABLE_SSH
     tab5SetCrashStage("ssh.libssh_begin");
@@ -62,7 +62,7 @@ bool SshClient::connect(const SshProfile& profile, String& error)
 
     tab5SetCrashStage("ssh_pty_shell");
     if (ssh_channel_open_session(channel) != SSH_OK ||
-        ssh_channel_request_pty_size(channel, profile.terminal.c_str(), 100, 32) != SSH_OK ||
+        ssh_channel_request_pty_size(channel, profile.terminal.c_str(), columns, rows) != SSH_OK ||
         ssh_channel_request_shell(channel) != SSH_OK) {
         error = ssh_get_error(session);
         ssh_channel_free(channel);
@@ -78,6 +78,8 @@ bool SshClient::connect(const SshProfile& profile, String& error)
     return true;
 #else
     (void)profile;
+    (void)columns;
+    (void)rows;
     error = "ENABLE_SSH is disabled";
     return false;
 #endif

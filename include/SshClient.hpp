@@ -5,7 +5,7 @@
 
 class SshClient {
 public:
-    bool connect(const SshProfile& profile, String& error);
+    bool connect(const SshProfile& profile, String& error, int columns = 100, int rows = 32);
     void disconnect();
     bool connected() const;
     int read(char* buffer, size_t len);

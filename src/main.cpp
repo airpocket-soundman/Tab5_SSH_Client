@@ -243,6 +243,11 @@ int terminalCellWidth()
 {
     setTerminalFont();
     int w = screenSprite.textWidth("M");
+    static const char sample[] = " !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~";
+    for (size_t i = 0; i < strlen(sample); ++i) {
+        char text[2] = {sample[i], 0};
+        w = max<int>(w, screenSprite.textWidth(text));
+    }
     return max<int>(terminalFont().cellW, w);
 }
 
@@ -946,7 +951,7 @@ void connectActiveSsh()
     String err;
     appendStatus(String("Connecting SSH: ") + config.ssh[activeSsh].host);
     setCrashStage("ssh.connect");
-    if (ssh.connect(config.ssh[activeSsh], err)) {
+    if (ssh.connect(config.ssh[activeSsh], err, static_cast<int>(vt.columns()), static_cast<int>(vt.rows()))) {
         setCrashStage("ssh.connected");
         resetCommandEditor();
         vt.reset();
@@ -965,7 +970,7 @@ bool connectSshProfile(const SshProfile& profile)
     String err;
     appendStatus(String("Connecting SSH: ") + profile.user + "@" + profile.host);
     setCrashStage("ssh.connect.direct");
-    if (ssh.connect(profile, err)) {
+    if (ssh.connect(profile, err, static_cast<int>(vt.columns()), static_cast<int>(vt.rows()))) {
         setCrashStage("ssh.connected");
         resetCommandEditor();
         vt.reset();

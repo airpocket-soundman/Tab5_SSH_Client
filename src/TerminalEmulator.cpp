@@ -46,6 +46,8 @@ void TerminalEmulator::resize(size_t columns, size_t rows)
     _cursorRow = 0;
     _savedCol = 0;
     _savedRow = 0;
+    _scrollTop = 0;
+    _scrollBottom = _rows ? _rows - 1 : 0;
     _wrapPending = false;
     markAllDirty();
 }
@@ -68,6 +70,8 @@ void TerminalEmulator::clear()
     clearCells();
     _cursorCol = 0;
     _cursorRow = 0;
+    _scrollTop = 0;
+    _scrollBottom = _rows ? _rows - 1 : 0;
     _wrapPending = false;
 }
 
@@ -152,10 +156,13 @@ void TerminalEmulator::useAlternate(bool enabled)
 void TerminalEmulator::newline()
 {
     _wrapPending = false;
-    if (_cursorRow + 1 >= _rows) {
-        scrollUp(0, _rows - 1, 1);
-    } else {
+    size_t bottom = _scrollBottom ? _scrollBottom : (_rows ? _rows - 1 : 0);
+    if (_cursorRow == bottom) {
+        scrollUp(_scrollTop, bottom, 1);
+    } else if (_cursorRow + 1 < _rows) {
         ++_cursorRow;
+    } else if (_rows) {
+        scrollUp(0, _rows - 1, 1);
     }
 }
 
@@ -195,13 +202,13 @@ void TerminalEmulator::putGlyph(const String& glyph, bool wide)
     cell.bg = _bg;
     cell.bold = _bold;
     cell.inverse = _inverse;
-    cell.dirty = true;
+    markDirtyWithNeighbors(_cursorCol, _cursorRow);
 
     if (wide && _cursorCol + 1 < _cols) {
         Cell& next = mutableCell(_cursorCol + 1, _cursorRow);
         next = BlankCell(_fg, _bg);
         next.inverse = _inverse;
-        next.dirty = true;
+        markDirtyWithNeighbors(_cursorCol + 1, _cursorRow);
     }
 
     size_t advance = wide ? 2 : 1;
@@ -221,7 +228,7 @@ void TerminalEmulator::scrollUp(size_t top, size_t bottom, size_t count)
     for (size_t row = top; row + count <= bottom; ++row) {
         for (size_t col = 0; col < _cols; ++col) {
             buf[row * _cols + col] = buf[(row + count) * _cols + col];
-            buf[row * _cols + col].dirty = true;
+            markDirtyWithNeighbors(col, row);
         }
     }
     for (size_t row = bottom - count + 1; row <= bottom; ++row) {
@@ -235,6 +242,7 @@ void TerminalEmulator::clearRow(size_t row, size_t fromCol, size_t toCol)
     toCol = std::min(toCol, _cols - 1);
     for (size_t col = fromCol; col <= toCol; ++col) {
         mutableCell(col, row) = BlankCell(_fg, _bg);
+        markDirtyWithNeighbors(col, row);
     }
 }
 
@@ -244,6 +252,62 @@ void TerminalEmulator::clearCells()
     for (auto& cell : buf) {
         cell = BlankCell();
     }
+}
+
+void TerminalEmulator::scrollDown(size_t top, size_t bottom, size_t count)
+{
+    if (top >= _rows || bottom >= _rows || top > bottom || count == 0) return;
+    auto& buf = _alternate ? _alt : _main;
+    count = std::min(count, bottom - top + 1);
+    for (size_t row = bottom + 1; row-- > top + count;) {
+        for (size_t col = 0; col < _cols; ++col) {
+            buf[row * _cols + col] = buf[(row - count) * _cols + col];
+            markDirtyWithNeighbors(col, row);
+        }
+    }
+    for (size_t row = top; row < top + count; ++row) {
+        clearRow(row, 0, _cols - 1);
+    }
+}
+
+void TerminalEmulator::insertCells(size_t count)
+{
+    if (_cursorRow >= _rows || _cursorCol >= _cols || count == 0) return;
+    count = std::min(count, _cols - _cursorCol);
+    for (size_t col = _cols; col-- > _cursorCol + count;) {
+        mutableCell(col, _cursorRow) = mutableCell(col - count, _cursorRow);
+        markDirtyWithNeighbors(col, _cursorRow);
+    }
+    for (size_t col = _cursorCol; col < _cursorCol + count; ++col) {
+        mutableCell(col, _cursorRow) = BlankCell(_fg, _bg);
+        markDirtyWithNeighbors(col, _cursorRow);
+    }
+}
+
+void TerminalEmulator::deleteCells(size_t count)
+{
+    if (_cursorRow >= _rows || _cursorCol >= _cols || count == 0) return;
+    count = std::min(count, _cols - _cursorCol);
+    for (size_t col = _cursorCol; col + count < _cols; ++col) {
+        mutableCell(col, _cursorRow) = mutableCell(col + count, _cursorRow);
+        markDirtyWithNeighbors(col, _cursorRow);
+    }
+    for (size_t col = _cols - count; col < _cols; ++col) {
+        mutableCell(col, _cursorRow) = BlankCell(_fg, _bg);
+        markDirtyWithNeighbors(col, _cursorRow);
+    }
+}
+
+void TerminalEmulator::insertLines(size_t count)
+{
+    size_t bottom = _scrollBottom ? _scrollBottom : (_rows ? _rows - 1 : 0);
+    scrollDown(_cursorRow, bottom, count);
+}
+
+void TerminalEmulator::deleteLines(size_t count)
+{
+    size_t bottom = _scrollBottom ? _scrollBottom : (_rows ? _rows - 1 : 0);
+    scrollUp(_cursorRow, bottom, count);
 }
 
 void TerminalEmulator::processByte(uint8_t c)
@@ -364,6 +428,9 @@ void TerminalEmulator::executeCsi(char command)
         case 'G':
             setCursor(_cursorRow, static_cast<size_t>(std::max(1, param(0, 1)) - 1));
             break;
+        case '`':
+            setCursor(_cursorRow, static_cast<size_t>(std::max(1, param(0, 1)) - 1));
+            break;
         case 'H':
         case 'f':
             setCursor(static_cast<size_t>(std::max(1, param(0, 1)) - 1),
@@ -371,6 +438,30 @@ void TerminalEmulator::executeCsi(char command)
             break;
         case 'd':
             setCursor(static_cast<size_t>(std::max(1, param(0, 1)) - 1), _cursorCol);
+            break;
+        case '@':
+            insertCells(static_cast<size_t>(param(0, 1)));
+            break;
+        case 'P':
+            deleteCells(static_cast<size_t>(param(0, 1)));
+            break;
+        case 'X':
+            clearRow(_cursorRow, _cursorCol,
+                     std::min(_cols - 1, _cursorCol + static_cast<size_t>(param(0, 1)) - 1));
+            break;
+        case 'L':
+            insertLines(static_cast<size_t>(param(0, 1)));
+            break;
+        case 'M':
+            deleteLines(static_cast<size_t>(param(0, 1)));
+            break;
+        case 'S':
+            scrollUp(_scrollTop, _scrollBottom ? _scrollBottom : (_rows ? _rows - 1 : 0),
+                     static_cast<size_t>(param(0, 1)));
+            break;
+        case 'T':
+            scrollDown(_scrollTop, _scrollBottom ? _scrollBottom : (_rows ? _rows - 1 : 0),
+                       static_cast<size_t>(param(0, 1)));
             break;
         case 'J': {
             int mode = param(0, 0);
@@ -409,6 +500,15 @@ void TerminalEmulator::executeCsi(char command)
                 else if (p >= 90 && p <= 97) _fg = static_cast<uint8_t>(p - 90 + 8);
                 else if (p >= 100 && p <= 107) _bg = static_cast<uint8_t>(p - 100 + 8);
             }
+            break;
+        case 'r':
+            _scrollTop = static_cast<size_t>(std::max(1, param(0, 1)) - 1);
+            _scrollBottom = static_cast<size_t>(std::max(1, param(1, static_cast<int>(_rows))) - 1);
+            if (_scrollTop >= _rows || _scrollBottom >= _rows || _scrollTop > _scrollBottom) {
+                _scrollTop = 0;
+                _scrollBottom = _rows ? _rows - 1 : 0;
+            }
+            setCursor(0, 0);
             break;
         case 'h':
             if (_csi.startsWith("?")) {
@@ -476,6 +576,20 @@ void TerminalEmulator::setCursor(size_t row, size_t col)
 void TerminalEmulator::markDirty(size_t col, size_t row)
 {
     mutableCell(col, row).dirty = true;
+}
+
+void TerminalEmulator::markDirtyWithNeighbors(size_t col, size_t row)
+{
+    if (row >= _rows || col >= _cols) {
+        return;
+    }
+    mutableCell(col, row).dirty = true;
+    if (col > 0) {
+        mutableCell(col - 1, row).dirty = true;
+    }
+    if (col + 1 < _cols) {
+        mutableCell(col + 1, row).dirty = true;
+    }
 }
 
 TerminalEmulator::Cell& TerminalEmulator::mutableCell(size_t col, size_t row)
