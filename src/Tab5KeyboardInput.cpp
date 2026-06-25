@@ -22,6 +22,8 @@ KeyAction mapNamedKey(const char* chars)
 {
     String token(chars);
     token.toLowerCase();
+    token.replace("_", " ");
+    token.replace("-", " ");
     if (token == "backspace" || token == "bs") {
         return mapper.mapChar(static_cast<char>(0x7F));
     }
@@ -36,6 +38,102 @@ KeyAction mapNamedKey(const char* chars)
     }
     if (token == "space") {
         return mapper.mapChar(' ');
+    }
+    if (token == "minus" || token == "hyphen") {
+        return mapper.mapChar('-');
+    }
+    if (token == "underscore") {
+        return mapper.mapChar('_');
+    }
+    if (token == "equal" || token == "equals") {
+        return mapper.mapChar('=');
+    }
+    if (token == "plus") {
+        return mapper.mapChar('+');
+    }
+    if (token == "left bracket" || token == "open bracket" || token == "lbracket") {
+        return mapper.mapChar('[');
+    }
+    if (token == "right bracket" || token == "close bracket" || token == "rbracket") {
+        return mapper.mapChar(']');
+    }
+    if (token == "left brace" || token == "open brace" || token == "lbrace") {
+        return mapper.mapChar('{');
+    }
+    if (token == "right brace" || token == "close brace" || token == "rbrace") {
+        return mapper.mapChar('}');
+    }
+    if (token == "backslash") {
+        return mapper.mapChar('\\');
+    }
+    if (token == "pipe" || token == "vertical bar") {
+        return mapper.mapChar('|');
+    }
+    if (token == "semicolon") {
+        return mapper.mapChar(';');
+    }
+    if (token == "colon") {
+        return mapper.mapChar(':');
+    }
+    if (token == "quote" || token == "apostrophe" || token == "single quote") {
+        return mapper.mapChar('\'');
+    }
+    if (token == "double quote" || token == "quotation mark") {
+        return mapper.mapChar('"');
+    }
+    if (token == "grave" || token == "backquote" || token == "backtick") {
+        return mapper.mapChar('`');
+    }
+    if (token == "tilde") {
+        return mapper.mapChar('~');
+    }
+    if (token == "comma") {
+        return mapper.mapChar(',');
+    }
+    if (token == "period" || token == "dot") {
+        return mapper.mapChar('.');
+    }
+    if (token == "slash" || token == "forward slash") {
+        return mapper.mapChar('/');
+    }
+    if (token == "question" || token == "question mark") {
+        return mapper.mapChar('?');
+    }
+    if (token == "exclamation" || token == "exclamation mark") {
+        return mapper.mapChar('!');
+    }
+    if (token == "at" || token == "at sign") {
+        return mapper.mapChar('@');
+    }
+    if (token == "hash" || token == "number sign" || token == "pound") {
+        return mapper.mapChar('#');
+    }
+    if (token == "dollar" || token == "dollar sign") {
+        return mapper.mapChar('$');
+    }
+    if (token == "percent" || token == "percent sign") {
+        return mapper.mapChar('%');
+    }
+    if (token == "caret" || token == "circumflex") {
+        return mapper.mapChar('^');
+    }
+    if (token == "ampersand") {
+        return mapper.mapChar('&');
+    }
+    if (token == "asterisk" || token == "star") {
+        return mapper.mapChar('*');
+    }
+    if (token == "left paren" || token == "open paren" || token == "left parenthesis") {
+        return mapper.mapChar('(');
+    }
+    if (token == "right paren" || token == "close paren" || token == "right parenthesis") {
+        return mapper.mapChar(')');
+    }
+    if (token == "less" || token == "less than") {
+        return mapper.mapChar('<');
+    }
+    if (token == "greater" || token == "greater than") {
+        return mapper.mapChar('>');
     }
     if (token == "up" || token == "up arrow" || token == "arrow up") {
         return {KeyActionType::Text, "\x1B[A", 0};
