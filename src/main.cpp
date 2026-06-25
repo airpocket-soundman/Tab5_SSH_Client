@@ -410,8 +410,39 @@ bool drawBlockGlyph(uint32_t cp, int x, int y, int w, int h, uint16_t fg, uint16
         screenSprite.fillRect(x, y + h - half, w, half, fg);
         return true;
     }
+    if (cp == 0x258C) {
+        screenSprite.fillRect(x, y, max<int>(1, w / 2), h, fg);
+        return true;
+    }
     if (cp == 0x2590) {
         screenSprite.fillRect(x + w / 2, y, max<int>(1, w - w / 2), h, fg);
+        return true;
+    }
+    if (cp >= 0x2596 && cp <= 0x259F) {
+        const int leftW = max<int>(1, w / 2);
+        const int rightX = x + leftW;
+        const int rightW = max<int>(1, w - leftW);
+        const int topH = max<int>(1, h / 2);
+        const int bottomY = y + topH;
+        const int bottomH = max<int>(1, h - topH);
+        auto quad = [&](bool tl, bool tr, bool bl, bool br) {
+            if (tl) screenSprite.fillRect(x, y, leftW, topH, fg);
+            if (tr) screenSprite.fillRect(rightX, y, rightW, topH, fg);
+            if (bl) screenSprite.fillRect(x, bottomY, leftW, bottomH, fg);
+            if (br) screenSprite.fillRect(rightX, bottomY, rightW, bottomH, fg);
+        };
+        switch (cp) {
+            case 0x2596: quad(false, false, true, false); break;
+            case 0x2597: quad(false, false, false, true); break;
+            case 0x2598: quad(true, false, false, false); break;
+            case 0x2599: quad(true, false, true, true); break;
+            case 0x259A: quad(true, false, false, true); break;
+            case 0x259B: quad(true, true, true, false); break;
+            case 0x259C: quad(true, true, false, true); break;
+            case 0x259D: quad(false, true, false, false); break;
+            case 0x259E: quad(false, true, true, false); break;
+            case 0x259F: quad(false, true, true, true); break;
+        }
         return true;
     }
     if (cp == 0x2591 || cp == 0x2592 || cp == 0x2593) {
@@ -425,6 +456,44 @@ bool drawBlockGlyph(uint32_t cp, int x, int y, int w, int h, uint16_t fg, uint16
     }
     (void)bg;
     return false;
+}
+
+bool drawBoxGlyph(uint32_t cp, int x, int y, int w, int h, uint16_t fg)
+{
+    const int cx = x + w / 2;
+    const int cy = y + h / 2;
+    const int thick = max<int>(1, min<int>(w, h) / 8);
+    auto hline = [&](int x1, int x2) {
+        screenSprite.fillRect(min(x1, x2), cy - thick / 2, abs(x2 - x1) + 1, thick, fg);
+    };
+    auto vline = [&](int y1, int y2) {
+        screenSprite.fillRect(cx - thick / 2, min(y1, y2), thick, abs(y2 - y1) + 1, fg);
+    };
+    auto smoothCorner = [&](bool right, bool down) {
+        const int insetX = max<int>(1, w / 4);
+        const int insetY = max<int>(1, h / 4);
+        const int x1 = right ? cx + insetX / 2 : cx - insetX / 2;
+        const int x2 = right ? cx + insetX : cx - insetX;
+        const int y1 = down ? cy + insetY / 2 : cy - insetY / 2;
+        const int y2 = down ? cy + insetY : cy - insetY;
+        screenSprite.fillRect(min(cx, x1), min(cy, y1), max<int>(1, abs(x1 - cx) + thick), thick, fg);
+        screenSprite.fillRect(min(x1, x2), min(y1, y2), thick, max<int>(1, abs(y2 - y1) + thick), fg);
+    };
+
+    switch (cp) {
+        case 0x2500: hline(x, x + w - 1); return true;
+        case 0x2502: vline(y, y + h - 1); return true;
+        case 0x256D: hline(cx, x + w - 1); vline(cy, y + h - 1); smoothCorner(true, true); return true;
+        case 0x256E: hline(x, cx); vline(cy, y + h - 1); smoothCorner(false, true); return true;
+        case 0x2570: hline(cx, x + w - 1); vline(y, cy); smoothCorner(true, false); return true;
+        case 0x256F: hline(x, cx); vline(y, cy); smoothCorner(false, false); return true;
+        case 0x250C: hline(cx, x + w - 1); vline(cy, y + h - 1); return true;
+        case 0x2510: hline(x, cx); vline(cy, y + h - 1); return true;
+        case 0x2514: hline(cx, x + w - 1); vline(y, cy); return true;
+        case 0x2518: hline(x, cx); vline(y, cy); return true;
+        default:
+            return false;
+    }
 }
 
 void drawMixedTerminalLine(const String& line, int x, int lineTop, int lineHeight)
@@ -500,6 +569,9 @@ void drawVtTerminal()
             if (cell.ch != " ") {
                 uint32_t cp = utf8Codepoint(cell.ch);
                 if (drawBlockGlyph(cp, x, y, cellW, lineStep, fg, bg)) {
+                    continue;
+                }
+                if (drawBoxGlyph(cp, x, y, cellW, lineStep, fg)) {
                     continue;
                 }
                 bool japanese = static_cast<uint8_t>(cell.ch[0]) >= 0x80;
