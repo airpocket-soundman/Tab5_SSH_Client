@@ -594,6 +594,64 @@ bool sendSshText(const String& text)
     return ssh.write(reinterpret_cast<const uint8_t*>(text.c_str()), text.length());
 }
 
+void replaceRemoteCommandLine(const String& line)
+{
+    if (!ssh.connected()) {
+        return;
+    }
+    String payload;
+    payload += static_cast<char>(0x01);  // Ctrl-A: beginning of line in readline shells.
+    payload += static_cast<char>(0x0B);  // Ctrl-K: kill to end of line.
+    payload += line;
+    sendSshText(payload);
+    commandLine = line;
+    commandCursor = commandLine.length();
+}
+
+bool browseRemoteCommandHistory(int delta)
+{
+    if (vt.alternateScreen() || commandHistory.empty()) {
+        return false;
+    }
+    if (delta < 0) {
+        if (commandHistoryIndex == 0) {
+            return true;
+        }
+        --commandHistoryIndex;
+    } else {
+        if (commandHistoryIndex >= commandHistory.size()) {
+            return true;
+        }
+        ++commandHistoryIndex;
+    }
+    replaceRemoteCommandLine(commandHistoryIndex < commandHistory.size() ? commandHistory[commandHistoryIndex] : "");
+    return true;
+}
+
+void trackRemoteCommandText(const String& text)
+{
+    if (vt.alternateScreen()) {
+        return;
+    }
+    for (size_t i = 0; i < text.length(); ++i) {
+        char c = text[i];
+        if (c == '\r' || c == '\n') {
+            String line = commandLine;
+            line.trim();
+            rememberCommandHistory(line);
+            resetCommandEditor();
+        } else if (c == 0x08 || c == 0x7F) {
+            backspaceCommandText();
+        } else if (c == '\t') {
+            commandLine = "";
+            commandCursor = 0;
+            commandHistoryIndex = commandHistory.size();
+        } else if (std::isprint(static_cast<unsigned char>(c))) {
+            insertCommandText(String(c));
+        }
+    }
+}
+
 int settingTextY(int rowY)
 {
     return rowY + max<int>(6, (settingRowH() - terminalFont().settingsLineHeight) / 2);
@@ -2176,7 +2234,16 @@ void handleTerminalAction(const KeyAction& action)
     switch (action.type) {
         case KeyActionType::Text:
             if (ssh.connected()) {
+                if (isUpKey(action) && browseRemoteCommandHistory(-1)) {
+                    dirty = true;
+                    break;
+                }
+                if (isDownKey(action) && browseRemoteCommandHistory(1)) {
+                    dirty = true;
+                    break;
+                }
                 sendSshText(action.text);
+                trackRemoteCommandText(action.text);
             } else {
                 handleDisconnectedTerminalText(action);
             }
