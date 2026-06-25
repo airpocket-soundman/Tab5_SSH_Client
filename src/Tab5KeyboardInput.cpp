@@ -69,6 +69,32 @@ KeyAction mapNamedKey(const char* chars)
     }
     return {};
 }
+
+KeyAction mapCtrlCharacter(char c)
+{
+    if (c >= 'a' && c <= 'z') {
+        return {KeyActionType::Text, String(static_cast<char>(c - 'a' + 1)), 0};
+    }
+    if (c >= 'A' && c <= 'Z') {
+        return {KeyActionType::Text, String(static_cast<char>(c - 'A' + 1)), 0};
+    }
+    switch (c) {
+        case '[':
+            return {KeyActionType::Text, String(static_cast<char>(0x1B)), 0};
+        case '\\':
+            return {KeyActionType::Text, String(static_cast<char>(0x1C)), 0};
+        case ']':
+            return {KeyActionType::Text, String(static_cast<char>(0x1D)), 0};
+        case '^':
+            return {KeyActionType::Text, String(static_cast<char>(0x1E)), 0};
+        case '_':
+            return {KeyActionType::Text, String(static_cast<char>(0x1F)), 0};
+        case '?':
+            return {KeyActionType::Text, String(static_cast<char>(0x7F)), 0};
+        default:
+            return {};
+    }
+}
 }
 
 void Tab5KeyboardInput::configure(const KeyboardConfig& config)
@@ -115,7 +141,8 @@ void Tab5KeyboardInput::update()
                 push(named);
             } else {
                 for (uint8_t i = 0; i < event.chr.length; ++i) {
-                    push(mapper.mapChar(event.chr.chars[i]));
+                    KeyAction action = event.isCtrl() ? mapCtrlCharacter(event.chr.chars[i]) : KeyAction{};
+                    push(action.type != KeyActionType::None ? action : mapper.mapChar(event.chr.chars[i]));
                 }
             }
         } else if (event.type == m5::unit::tab5_keyboard::EventType::Hid) {
