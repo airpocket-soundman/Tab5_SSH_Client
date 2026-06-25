@@ -2175,6 +2175,12 @@ void handleTerminalAction(const KeyAction& action)
 
 void handleAction(const KeyAction& action)
 {
+    if (action.type == KeyActionType::Menu && screen == Screen::Terminal && ssh.connected()) {
+        sendSshText(String(static_cast<char>(0x1B)));
+        dirty = true;
+        return;
+    }
+
     if (action.type == KeyActionType::Menu) {
         handleKeyboardMenuAction(action);
         return;
