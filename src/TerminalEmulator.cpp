@@ -41,6 +41,42 @@ uint8_t utf8Length(uint8_t c)
     if ((c & 0xF8) == 0xF0) return 4;
     return 1;
 }
+
+uint32_t utf8Codepoint(const String& text)
+{
+    if (!text.length()) return 0;
+    const uint8_t c0 = static_cast<uint8_t>(text[0]);
+    if (c0 < 0x80) return c0;
+    if ((c0 & 0xE0) == 0xC0 && text.length() >= 2) {
+        return ((c0 & 0x1F) << 6) | (static_cast<uint8_t>(text[1]) & 0x3F);
+    }
+    if ((c0 & 0xF0) == 0xE0 && text.length() >= 3) {
+        return ((c0 & 0x0F) << 12) |
+               ((static_cast<uint8_t>(text[1]) & 0x3F) << 6) |
+               (static_cast<uint8_t>(text[2]) & 0x3F);
+    }
+    if ((c0 & 0xF8) == 0xF0 && text.length() >= 4) {
+        return ((c0 & 0x07) << 18) |
+               ((static_cast<uint8_t>(text[1]) & 0x3F) << 12) |
+               ((static_cast<uint8_t>(text[2]) & 0x3F) << 6) |
+               (static_cast<uint8_t>(text[3]) & 0x3F);
+    }
+    return c0;
+}
+
+bool isWideCodepoint(uint32_t cp)
+{
+    return (cp >= 0x1100 && cp <= 0x115F) ||
+           cp == 0x2329 || cp == 0x232A ||
+           (cp >= 0x2E80 && cp <= 0xA4CF) ||
+           (cp >= 0xAC00 && cp <= 0xD7A3) ||
+           (cp >= 0xF900 && cp <= 0xFAFF) ||
+           (cp >= 0xFE10 && cp <= 0xFE19) ||
+           (cp >= 0xFE30 && cp <= 0xFE6F) ||
+           (cp >= 0xFF00 && cp <= 0xFF60) ||
+           (cp >= 0xFFE0 && cp <= 0xFFE6) ||
+           (cp >= 0x1F300 && cp <= 0x1FAFF);
+}
 }
 
 void TerminalEmulator::resize(size_t columns, size_t rows)
@@ -328,7 +364,7 @@ void TerminalEmulator::processByte(uint8_t c)
         if (isUtf8Continuation(c)) {
             _utf8 += static_cast<char>(c);
             if (_utf8.length() >= _utf8Expected) {
-                putGlyph(_utf8, true);
+                putGlyph(_utf8, isWideCodepoint(utf8Codepoint(_utf8)));
                 _utf8 = "";
                 _utf8Expected = 0;
                 _state = State::Ground;
@@ -378,7 +414,7 @@ void TerminalEmulator::processByte(uint8_t c)
         _utf8 = static_cast<char>(c);
         _utf8Expected = utf8Length(c);
         if (_utf8Expected <= 1) {
-            putGlyph(_utf8, true);
+            putGlyph(_utf8, isWideCodepoint(utf8Codepoint(_utf8)));
             _utf8 = "";
         } else {
             _state = State::Utf8;
