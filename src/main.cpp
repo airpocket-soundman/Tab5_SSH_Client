@@ -6,7 +6,10 @@
 #include "WifiProfiles.hpp"
 #include "fonts/TerminusBitmap.hpp"
 
+#include <FS.h>
 #include <M5Unified.h>
+#include <SD.h>
+#include <SPI.h>
 #include <WiFi.h>
 #include <algorithm>
 #include <cctype>
@@ -97,6 +100,10 @@ bool wifiPinsConfigured = false;
 bool timeSyncStarted = false;
 bool timeSynced = false;
 uint32_t lastTimeSyncAttempt = 0;
+bool sdReady = false;
+bool sdInitAttempted = false;
+String sdLastError = "not initialized";
+String sdCwd = "/";
 String serialCommand;
 String commandLine;
 size_t commandCursor = 0;
@@ -115,6 +122,10 @@ constexpr bool ForceFixedWifiForTest = false;
 constexpr const char* FixedWifiSsid = "kumakero2.4";
 constexpr const char* FixedWifiPassword = "4roses6126";
 constexpr const char* LocalPrompt = "[tab5] ";
+constexpr int SD_SPI_CS_PIN = 42;
+constexpr int SD_SPI_SCK_PIN = 43;
+constexpr int SD_SPI_MOSI_PIN = 44;
+constexpr int SD_SPI_MISO_PIN = 39;
 
 constexpr int HeaderH = 44;
 constexpr int HeaderTouchH = HeaderH * 3;
@@ -1269,6 +1280,7 @@ void appendCliHelp()
     appendCliLine("  wifi status, wifi list, ip addr");
     appendCliLine("  ssh list, ssh connect <index>, ssh disconnect");
     appendCliLine("  ssh user@host[:port] [password]");
+    appendCliLine("  sd status, ls [path], cat <path>, sd write <path> <text>");
 }
 
 void appendCliManEntry(const char* name, const char* synopsis, const char* description)
@@ -1362,9 +1374,24 @@ bool appendCliMan(const String& topic)
         appendCliManEntry("ssh direct", "ssh user@host[:port] [password]", "Connect without a saved profile.");
         return true;
     }
-    if (key == "ls" || key == "dir" || key == "cd" || key == "pwd" || key == "cat") {
-        appendCliManEntry(key.c_str(), key.c_str(), "No shell filesystem is implemented in Tab5 CLI.");
-        appendCliLine("Use wifi list, wifi status, ssh list, or status.");
+    if (key == "sd" || key == "sd status") {
+        appendCliManEntry("sd status", "sd status", "Show microSD mount state, type, size, and current directory.");
+        appendCliLine("SEE ALSO");
+        appendCliLine("  sd ls, sd cat, sd write, sd append, sd mkdir, sd rm");
+        return true;
+    }
+    if (key == "ls" || key == "dir" || key == "sd ls") {
+        appendCliManEntry("sd ls", "ls [path] | sd ls [path]", "List files on the Tab5 microSD card.");
+        return true;
+    }
+    if (key == "cd" || key == "pwd" || key == "cat" || key == "sd cat") {
+        appendCliManEntry(key.c_str(), key.c_str(), "Operate on the Tab5 microSD card.");
+        appendCliLine("Examples: pwd, cd /scripts, cat boot.py");
+        return true;
+    }
+    if (key == "sd write" || key == "sd append" || key == "sd mkdir" || key == "sd rm") {
+        appendCliManEntry(key.c_str(), key.c_str(), "Create, append, make directories, or remove files on microSD.");
+        appendCliLine("Examples: sd write /hello.py print(123), sd append /notes.txt text");
         return true;
     }
     appendCliLine(String("No manual entry for ") + topic);
@@ -1393,6 +1420,247 @@ void appendSshList()
         const auto& p = config.ssh[i];
         appendCliLine(String(i == activeSsh ? "* " : "  ") + i + " " + p.name + " " + p.user + "@" + p.host + ":" + p.port);
     }
+}
+
+String normalizeSdPath(const String& input)
+{
+    String path = input;
+    path.trim();
+    if (!path.length()) {
+        path = sdCwd;
+    } else if (!path.startsWith("/")) {
+        path = sdCwd;
+        if (!path.endsWith("/")) {
+            path += "/";
+        }
+        path += input;
+    }
+    while (path.indexOf("//") >= 0) {
+        path.replace("//", "/");
+    }
+    if (!path.startsWith("/")) {
+        path = "/" + path;
+    }
+    if (path.length() > 1 && path.endsWith("/")) {
+        path.remove(path.length() - 1);
+    }
+    return path;
+}
+
+bool ensureSdReady()
+{
+    if (sdReady) {
+        return true;
+    }
+    if (!sdInitAttempted) {
+        sdInitAttempted = true;
+        SPI.begin(SD_SPI_SCK_PIN, SD_SPI_MISO_PIN, SD_SPI_MOSI_PIN, SD_SPI_CS_PIN);
+        if (SD.begin(SD_SPI_CS_PIN, SPI, 25000000)) {
+            sdReady = true;
+            sdLastError = "";
+            return true;
+        }
+        sdLastError = "SD card not detected";
+    }
+    return false;
+}
+
+String formatBytes(uint64_t bytes)
+{
+    if (bytes < 1024) {
+        return String(static_cast<unsigned long>(bytes)) + " B";
+    }
+    if (bytes < 1024ULL * 1024ULL) {
+        return String(static_cast<double>(bytes) / 1024.0, 1) + " KB";
+    }
+    return String(static_cast<double>(bytes) / (1024.0 * 1024.0), 1) + " MB";
+}
+
+void appendSdStatus()
+{
+    if (!ensureSdReady()) {
+        appendCliLine(String("sd=not ready: ") + sdLastError);
+        return;
+    }
+    uint8_t type = SD.cardType();
+    String typeName = "unknown";
+    if (type == CARD_MMC) typeName = "MMC";
+    else if (type == CARD_SD) typeName = "SDSC";
+    else if (type == CARD_SDHC) typeName = "SDHC";
+    appendCliLine(String("sd=ready type=") + typeName +
+                  " size=" + formatBytes(SD.cardSize()) +
+                  " used=" + formatBytes(SD.usedBytes()) +
+                  " total=" + formatBytes(SD.totalBytes()));
+    appendCliLine(String("cwd=") + sdCwd);
+}
+
+void appendSdList(const String& inputPath)
+{
+    if (!ensureSdReady()) {
+        appendCliLine(String("sd: ") + sdLastError);
+        return;
+    }
+    String path = normalizeSdPath(inputPath);
+    File root = SD.open(path, FILE_READ);
+    if (!root) {
+        appendCliLine(String("sd ls: cannot open ") + path);
+        return;
+    }
+    if (!root.isDirectory()) {
+        appendCliLine(formatBytes(root.size()) + " " + path);
+        root.close();
+        return;
+    }
+    appendCliLine(String("sd: ") + path);
+    File file = root.openNextFile();
+    while (file) {
+        String name = file.name();
+        if (file.isDirectory()) {
+            appendCliLine(String("  <DIR>      ") + name + "/");
+        } else {
+            appendCliLine(String("  ") + formatBytes(file.size()) + "  " + name);
+        }
+        file = root.openNextFile();
+    }
+    root.close();
+}
+
+void appendSdCat(const String& inputPath)
+{
+    if (!ensureSdReady()) {
+        appendCliLine(String("sd: ") + sdLastError);
+        return;
+    }
+    String path = normalizeSdPath(inputPath);
+    File file = SD.open(path, FILE_READ);
+    if (!file || file.isDirectory()) {
+        appendCliLine(String("sd cat: cannot open ") + path);
+        return;
+    }
+    String line;
+    size_t printed = 0;
+    while (file.available() && printed < 12000) {
+        char c = static_cast<char>(file.read());
+        if (c == '\r') {
+            continue;
+        }
+        if (c == '\n') {
+            appendCliLine(line);
+            line = "";
+        } else {
+            line += c;
+            if (line.length() >= 160) {
+                appendCliLine(line);
+                line = "";
+            }
+        }
+        ++printed;
+    }
+    if (line.length()) {
+        appendCliLine(line);
+    }
+    if (file.available()) {
+        appendCliLine("... truncated");
+    }
+    file.close();
+}
+
+bool writeSdText(const String& inputPath, const String& text, bool append)
+{
+    if (!ensureSdReady()) {
+        appendCliLine(String("sd: ") + sdLastError);
+        return false;
+    }
+    String path = normalizeSdPath(inputPath);
+    if (!append && SD.exists(path)) {
+        SD.remove(path);
+    }
+    File file = SD.open(path, FILE_APPEND);
+    if (!file) {
+        appendCliLine(String("sd write: cannot open ") + path);
+        return false;
+    }
+    file.print(text);
+    file.print("\n");
+    file.close();
+    appendCliLine(String(append ? "appended " : "wrote ") + path);
+    return true;
+}
+
+bool handleSdCliCommand(const String& command, const String& lower)
+{
+    if (lower == "sd" || lower == "sd status") {
+        appendSdStatus();
+        return true;
+    }
+    if (lower == "pwd" || lower == "sd pwd") {
+        appendCliLine(sdCwd);
+        return true;
+    }
+    if (lower == "ls" || lower == "dir" || lower == "sd ls" || lower == "sd dir") {
+        appendSdList("");
+        return true;
+    }
+    if (lower.startsWith("ls ") || lower.startsWith("dir ")) {
+        appendSdList(command.substring(command.indexOf(' ') + 1));
+        return true;
+    }
+    if (lower.startsWith("sd ls ") || lower.startsWith("sd dir ")) {
+        appendSdList(command.substring(command.indexOf(' ', 3) + 1));
+        return true;
+    }
+    if (lower.startsWith("cd ") || lower.startsWith("sd cd ")) {
+        String arg = lower.startsWith("sd cd ") ? command.substring(6) : command.substring(3);
+        String path = normalizeSdPath(arg);
+        if (!ensureSdReady()) {
+            appendCliLine(String("sd: ") + sdLastError);
+            return true;
+        }
+        File dir = SD.open(path, FILE_READ);
+        if (!dir || !dir.isDirectory()) {
+            appendCliLine(String("sd cd: not a directory: ") + path);
+        } else {
+            sdCwd = path;
+            appendCliLine(sdCwd);
+        }
+        return true;
+    }
+    if (lower.startsWith("cat ") || lower.startsWith("sd cat ")) {
+        appendSdCat(lower.startsWith("sd cat ") ? command.substring(7) : command.substring(4));
+        return true;
+    }
+    if (lower.startsWith("sd write ") || lower.startsWith("sd append ")) {
+        bool append = lower.startsWith("sd append ");
+        size_t baseLen = append ? strlen("sd append ") : strlen("sd write ");
+        String rest = command.substring(baseLen);
+        rest.trim();
+        int split = rest.indexOf(' ');
+        if (split <= 0) {
+            appendCliLine(String("usage: ") + (append ? "sd append" : "sd write") + " <path> <text>");
+            return true;
+        }
+        writeSdText(rest.substring(0, split), rest.substring(split + 1), append);
+        return true;
+    }
+    if (lower.startsWith("sd mkdir ")) {
+        if (!ensureSdReady()) {
+            appendCliLine(String("sd: ") + sdLastError);
+            return true;
+        }
+        String path = normalizeSdPath(command.substring(strlen("sd mkdir ")));
+        appendCliLine(SD.mkdir(path) ? String("created ") + path : String("sd mkdir failed: ") + path);
+        return true;
+    }
+    if (lower.startsWith("sd rm ")) {
+        if (!ensureSdReady()) {
+            appendCliLine(String("sd: ") + sdLastError);
+            return true;
+        }
+        String path = normalizeSdPath(command.substring(strlen("sd rm ")));
+        appendCliLine(SD.remove(path) ? String("removed ") + path : String("sd rm failed: ") + path);
+        return true;
+    }
+    return false;
 }
 
 String formattedDateTime()
@@ -1475,6 +1743,7 @@ bool handleTab5CliCommand(const String& line)
         appendCliLine(String("device=") + config.system.deviceName + " region=" + config.system.region);
         appendCliLine(String("time=") + (timeSynced ? formattedDateTime() : "not synced"));
         appendCliLine(String("keymap=") + config.keyboard.layout + " keyboard=" + keyboard.status());
+        appendCliLine(String("sd=") + (sdReady ? "ready" : sdLastError));
         appendCliLine(String("activeWifi=") + activeWifi + " activeSsh=" + activeSsh);
         return true;
     }
@@ -1516,11 +1785,7 @@ bool handleTab5CliCommand(const String& line)
         appendCliLine(String("up ") + (seconds / 3600) + "h " + ((seconds / 60) % 60) + "m " + (seconds % 60) + "s");
         return true;
     }
-    if (lower == "pwd" || lower == "ls" || lower.startsWith("ls ") ||
-        lower == "dir" || lower.startsWith("dir ") || lower == "cd" || lower.startsWith("cd ") ||
-        lower.startsWith("cat ")) {
-        appendCliLine("Tab5 CLI has no shell filesystem.");
-        appendCliLine("Use 'wifi list', 'wifi status', 'ssh list', or 'status'.");
+    if (handleSdCliCommand(command, lower)) {
         return true;
     }
     if (lower == "wifi status") {
@@ -3666,6 +3931,7 @@ void serialPrintHelp()
     Serial.println("  help");
     Serial.println("  status");
     Serial.println("  crash");
+    Serial.println("  sd status");
     Serial.println("  wifi status");
     Serial.println("  ssh list");
     Serial.println("  ssh active <index>");
@@ -3678,7 +3944,7 @@ void serialPrintHelp()
 
 void serialPrintStatus()
 {
-    Serial.printf("screen=%u wifi=%s wl=%d ssh=%s activeWifi=%u activeSsh=%u keymap=%s keyboard=%s stage=%s\r\n",
+    Serial.printf("screen=%u wifi=%s wl=%d ssh=%s activeWifi=%u activeSsh=%u keymap=%s sd=%s keyboard=%s stage=%s\r\n",
                   static_cast<unsigned>(screen),
                   wifiStatusText.c_str(),
                   static_cast<int>(WiFi.status()),
@@ -3686,8 +3952,23 @@ void serialPrintStatus()
                   static_cast<unsigned>(activeWifi),
                   static_cast<unsigned>(activeSsh),
                   config.keyboard.layout.c_str(),
+                  sdReady ? "ready" : sdLastError.c_str(),
                   keyboard.status().c_str(),
                   crashStage);
+}
+
+void serialPrintSdStatus()
+{
+    if (!ensureSdReady()) {
+        Serial.printf("sd=not ready error=%s\r\n", sdLastError.c_str());
+        return;
+    }
+    Serial.printf("sd=ready type=%u size=%llu used=%llu total=%llu cwd=%s\r\n",
+                  static_cast<unsigned>(SD.cardType()),
+                  static_cast<unsigned long long>(SD.cardSize()),
+                  static_cast<unsigned long long>(SD.usedBytes()),
+                  static_cast<unsigned long long>(SD.totalBytes()),
+                  sdCwd.c_str());
 }
 
 void serialPrintSshProfiles()
@@ -3799,6 +4080,8 @@ void handleSerialCommand(String command)
         serialPrintStatus();
     } else if (command == "crash") {
         Serial.printf("resetStageMagic=0x%08x stage=%s\r\n", static_cast<unsigned>(crashStageMagic), crashStage);
+    } else if (command == "sd status") {
+        serialPrintSdStatus();
     } else if (command == "wifi status") {
         Serial.printf("wifiStatus=%s wl=%d ip=%s ssid=%s\r\n",
                       wifiStatusText.c_str(),
@@ -3944,6 +4227,11 @@ void setup()
     keyboard.configure(config.keyboard);
     keyboard.begin();
     appendStatus(keyboard.status());
+    if (ensureSdReady()) {
+        appendStatus(String("SD ready: ") + formatBytes(SD.cardSize()));
+    } else {
+        appendStatus(sdLastError);
+    }
     configureTerminal();
 
     draw();
