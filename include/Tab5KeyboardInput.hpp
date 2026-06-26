@@ -11,6 +11,9 @@ public:
     bool available() const;
     KeyAction read();
     String status() const { return _status; }
+    void noteUsbKeyboardMounted();
+    void noteUsbKeyboardUnmounted();
+    void enqueueUsbReport(uint8_t devAddr, uint8_t instance, uint8_t modifier, const uint8_t* keycodes, size_t keyCount);
 
 private:
     static constexpr size_t QueueSize = 32;

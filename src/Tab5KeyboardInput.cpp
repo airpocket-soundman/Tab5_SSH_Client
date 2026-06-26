@@ -8,14 +8,94 @@
 #include <Wire.h>
 #endif
 
+#if ENABLE_USB_HOST_KEYBOARD
+#include <tusb.h>
+extern "C" esp_err_t init_usb_hal(bool external_phy);
+#endif
+
 namespace {
 KeyboardMapper mapper;
+Tab5KeyboardInput* activeInput = nullptr;
 
 #if USE_M5_TAB5_KEYBOARD
 m5::unit::UnitUnified units;
 m5::unit::UnitTab5Keyboard keyboard;
 constexpr int8_t TAB5_KEYBOARD_SDA = 0;
 constexpr int8_t TAB5_KEYBOARD_SCL = 1;
+#endif
+
+#if ENABLE_USB_HOST_KEYBOARD
+bool usbHostStarted = false;
+uint32_t usbReports = 0;
+uint8_t usbKeyboardCount = 0;
+
+struct UsbKeyboardState {
+    bool active{false};
+    uint8_t devAddr{0};
+    uint8_t instance{0};
+    uint8_t previous[6]{};
+};
+
+UsbKeyboardState usbStates[6];
+
+UsbKeyboardState* usbState(uint8_t devAddr, uint8_t instance, bool create)
+{
+    UsbKeyboardState* freeSlot = nullptr;
+    for (auto& state : usbStates) {
+        if (state.active && state.devAddr == devAddr && state.instance == instance) {
+            return &state;
+        }
+        if (!state.active && !freeSlot) {
+            freeSlot = &state;
+        }
+    }
+    if (!create || !freeSlot) {
+        return nullptr;
+    }
+    *freeSlot = {};
+    freeSlot->active = true;
+    freeSlot->devAddr = devAddr;
+    freeSlot->instance = instance;
+    return freeSlot;
+}
+
+void clearUsbState(uint8_t devAddr, uint8_t instance)
+{
+    for (auto& state : usbStates) {
+        if (state.active && state.devAddr == devAddr && state.instance == instance) {
+            state = {};
+            return;
+        }
+    }
+}
+
+bool keyWasPressed(const UsbKeyboardState& state, uint8_t keycode)
+{
+    for (uint8_t previous : state.previous) {
+        if (previous == keycode) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool beginUsbHost()
+{
+    if (usbHostStarted) {
+        return true;
+    }
+    init_usb_hal(false);
+    tusb_rhport_init_t init = {};
+    init.role = TUSB_ROLE_HOST;
+#if CONFIG_IDF_TARGET_ESP32P4
+    init.speed = TUSB_SPEED_HIGH;
+    usbHostStarted = tusb_init(BOARD_TUH_RHPORT, &init);
+#else
+    init.speed = TUSB_SPEED_FULL;
+    usbHostStarted = tusb_init(0, &init);
+#endif
+    return usbHostStarted;
+}
 #endif
 
 KeyAction mapNamedKey(const char* chars)
@@ -193,15 +273,58 @@ KeyAction mapCtrlCharacter(char c)
             return {};
     }
 }
+
+#if ENABLE_USB_HOST_KEYBOARD
+extern "C" void tuh_hid_mount_cb(uint8_t dev_addr, uint8_t idx, const uint8_t*, uint16_t)
+{
+    if (tuh_hid_interface_protocol(dev_addr, idx) == HID_ITF_PROTOCOL_KEYBOARD) {
+        usbState(dev_addr, idx, true);
+        ++usbKeyboardCount;
+        if (activeInput) {
+            activeInput->noteUsbKeyboardMounted();
+        }
+        tuh_hid_receive_report(dev_addr, idx);
+    }
+}
+
+extern "C" void tuh_hid_umount_cb(uint8_t dev_addr, uint8_t idx)
+{
+    if (tuh_hid_interface_protocol(dev_addr, idx) == HID_ITF_PROTOCOL_KEYBOARD) {
+        clearUsbState(dev_addr, idx);
+        if (usbKeyboardCount) {
+            --usbKeyboardCount;
+        }
+        if (activeInput) {
+            activeInput->noteUsbKeyboardUnmounted();
+        }
+    }
+}
+
+extern "C" void tuh_hid_report_received_cb(uint8_t dev_addr, uint8_t idx, const uint8_t* report, uint16_t len)
+{
+    if (tuh_hid_interface_protocol(dev_addr, idx) == HID_ITF_PROTOCOL_KEYBOARD && len >= sizeof(hid_keyboard_report_t)) {
+        const auto* keyboardReport = reinterpret_cast<const hid_keyboard_report_t*>(report);
+        if (activeInput) {
+            activeInput->enqueueUsbReport(dev_addr, idx, keyboardReport->modifier, keyboardReport->keycode,
+                                          sizeof(keyboardReport->keycode));
+        }
+        ++usbReports;
+    }
+    tuh_hid_receive_report(dev_addr, idx);
+}
+#endif
 }
 
 void Tab5KeyboardInput::configure(const KeyboardConfig& config)
 {
     mapper.configure(config);
+    activeInput = this;
 }
 
 bool Tab5KeyboardInput::begin()
 {
+    activeInput = this;
+    bool tab5Ready = false;
 #if USE_M5_TAB5_KEYBOARD
     auto cfg = keyboard.config();
     cfg.mode = m5::unit::tab5_keyboard::Mode::Character;
@@ -214,20 +337,32 @@ bool Tab5KeyboardInput::begin()
     Wire.begin(TAB5_KEYBOARD_SDA, TAB5_KEYBOARD_SCL, keyboard.component_config().clock);
     if (!units.add(keyboard, Wire) || !units.begin()) {
         _status = "Tab5 keyboard not found; Serial input fallback active";
-        return false;
+    } else {
+        uint8_t fw = keyboard.firmwareVersion();
+        keyboard.writeMode(m5::unit::tab5_keyboard::Mode::Character);
+        _status = String("Tab5 keyboard ready fw=0x") + String(fw, HEX);
+        tab5Ready = true;
     }
-    uint8_t fw = keyboard.firmwareVersion();
-    keyboard.writeMode(m5::unit::tab5_keyboard::Mode::Character);
-    _status = String("Tab5 keyboard ready fw=0x") + String(fw, HEX);
-    return true;
 #else
     _status = "Serial input fallback active";
-    return false;
 #endif
+#if ENABLE_USB_HOST_KEYBOARD
+    if (beginUsbHost()) {
+        _status += "; USB host ready";
+    } else {
+        _status += "; USB host unavailable";
+    }
+#endif
+    return tab5Ready;
 }
 
 void Tab5KeyboardInput::update()
 {
+#if ENABLE_USB_HOST_KEYBOARD
+    if (usbHostStarted) {
+        tuh_task_ext(0, false);
+    }
+#endif
 #if USE_M5_TAB5_KEYBOARD
     keyboard.update(true);
     while (!keyboard.empty()) {
@@ -254,6 +389,43 @@ void Tab5KeyboardInput::update()
     while (Serial.available()) {
         push(mapper.mapChar(static_cast<char>(Serial.read())));
     }
+}
+
+void Tab5KeyboardInput::noteUsbKeyboardMounted()
+{
+    _status = String("USB keyboard ready count=") + usbKeyboardCount;
+}
+
+void Tab5KeyboardInput::noteUsbKeyboardUnmounted()
+{
+    _status = String("USB keyboard removed count=") + usbKeyboardCount;
+}
+
+void Tab5KeyboardInput::enqueueUsbReport(uint8_t devAddr, uint8_t instance, uint8_t modifier, const uint8_t* keycodes,
+                                         size_t keyCount)
+{
+#if ENABLE_USB_HOST_KEYBOARD
+    UsbKeyboardState* state = usbState(devAddr, instance, true);
+    if (!state) {
+        return;
+    }
+    for (size_t i = 0; i < keyCount; ++i) {
+        uint8_t keycode = keycodes[i];
+        if (!keycode || keyWasPressed(*state, keycode)) {
+            continue;
+        }
+        push(mapper.mapHid(modifier, keycode));
+    }
+    memset(state->previous, 0, sizeof(state->previous));
+    memcpy(state->previous, keycodes, min(keyCount, sizeof(state->previous)));
+    _status = String("USB keyboard reports=") + usbReports;
+#else
+    (void)devAddr;
+    (void)instance;
+    (void)modifier;
+    (void)keycodes;
+    (void)keyCount;
+#endif
 }
 
 bool Tab5KeyboardInput::available() const

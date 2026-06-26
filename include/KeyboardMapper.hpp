@@ -28,5 +28,6 @@ public:
 private:
     KeyboardConfig _config;
     char translatePrintable(char c) const;
+    char translateHidPrintable(uint8_t keycode, bool shift) const;
 };
 

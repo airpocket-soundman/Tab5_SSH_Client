@@ -794,6 +794,7 @@ bool isFallbackSymbolRange(uint32_t cp)
            (cp >= 0x2460 && cp <= 0x24FF) || // enclosed alphanumerics
            (cp >= 0x25A0 && cp <= 0x25FF) || // geometric shapes
            (cp >= 0x2600 && cp <= 0x27BF) || // misc symbols and dingbats
+           (cp >= 0x27C0 && cp <= 0x27FF) || // supplemental arrows and brackets
            (cp >= 0x2800 && cp <= 0x28FF) || // braille patterns
            (cp >= 0xE000 && cp <= 0xF8FF) || // private-use icons, including Nerd Font
            (cp >= 0x1F000 && cp <= 0x1FAFF); // emoji and symbol planes
@@ -924,6 +925,58 @@ bool drawFallbackUnicodeGlyph(uint32_t cp, int x, int y, int w, int h, uint16_t 
             screenSprite.fillTriangle(x + pad, cy, x + w - pad - 1, y + pad, x + w - pad - 1, y + h - pad - 1, fg);
         } else {
             screenSprite.fillTriangle(x + w - pad - 1, cy, x + pad, y + pad, x + pad, y + h - pad - 1, fg);
+        }
+        return true;
+    }
+    if (cp == 0x276E || cp == 0x276F || cp == 0x276C || cp == 0x276D ||
+        cp == 0x2770 || cp == 0x2771 || cp == 0x2772 || cp == 0x2773 ||
+        cp == 0x2039 || cp == 0x203A) {
+        const bool left = cp == 0x276E || cp == 0x276C || cp == 0x2770 || cp == 0x2772 || cp == 0x2039;
+        const int thick = max<int>(1, min<int>(w, h) / 8);
+        const int topY = y + pad;
+        const int bottomY = y + h - pad - 1;
+        const int innerX = left ? x + pad : x + w - pad - 1;
+        const int outerX = left ? x + w - pad - 1 : x + pad;
+        for (int t = 0; t < thick; ++t) {
+            screenSprite.drawLine(outerX + (left ? -t : t), topY, innerX + (left ? t : -t), cy, fg);
+            screenSprite.drawLine(innerX + (left ? t : -t), cy, outerX + (left ? -t : t), bottomY, fg);
+        }
+        return true;
+    }
+    if (cp == 0x2768 || cp == 0x2769 || cp == 0x276A || cp == 0x276B || cp == 0x2774 || cp == 0x2775) {
+        const bool left = cp == 0x2768 || cp == 0x276A || cp == 0x2774;
+        const int thick = max<int>(1, min<int>(w, h) / 10);
+        const int topY = y + pad;
+        const int bottomY = y + h - pad - 1;
+        const int midY = cy;
+        if (cp == 0x2774 || cp == 0x2775) {
+            const int outerX = left ? x + w - pad - 1 : x + pad;
+            const int innerX = left ? x + pad : x + w - pad - 1;
+            for (int t = 0; t < thick; ++t) {
+                screenSprite.drawLine(outerX, topY, innerX, topY + (midY - topY) / 2, fg);
+                screenSprite.drawLine(innerX, topY + (midY - topY) / 2, innerX, midY - t, fg);
+                screenSprite.drawLine(innerX, midY + t, innerX, midY + (bottomY - midY) / 2, fg);
+                screenSprite.drawLine(innerX, midY + (bottomY - midY) / 2, outerX, bottomY, fg);
+            }
+        } else {
+            const int outerX = left ? x + w - pad - 1 : x + pad;
+            const int innerX = left ? x + pad : x + w - pad - 1;
+            for (int t = 0; t < thick; ++t) {
+                screenSprite.drawLine(outerX, topY, innerX + (left ? t : -t), midY, fg);
+                screenSprite.drawLine(innerX + (left ? t : -t), midY, outerX, bottomY, fg);
+            }
+        }
+        return true;
+    }
+    if ((cp >= 0x2794 && cp <= 0x27BF) || cp == 0x27F6 || cp == 0x27F8 || cp == 0x27FA) {
+        const int tailX = x + pad;
+        const int headX = x + w - pad - 1;
+        const int headW = max<int>(3, w / 3);
+        const int thick = max<int>(1, min<int>(w, h) / 8);
+        screenSprite.fillRect(tailX, cy - thick / 2, max<int>(1, headX - tailX - headW / 2), thick, fg);
+        screenSprite.fillTriangle(headX, cy, headX - headW, y + pad, headX - headW, y + h - pad - 1, fg);
+        if (cp == 0x27F8 || cp == 0x27FA) {
+            screenSprite.fillRect(tailX, cy + thick + 1, max<int>(1, headX - tailX - headW / 2), thick, fg);
         }
         return true;
     }
@@ -1421,6 +1474,7 @@ bool handleTab5CliCommand(const String& line)
         appendCliLine(String("ssh=") + (ssh.connected() ? "connected" : "disconnected"));
         appendCliLine(String("device=") + config.system.deviceName + " region=" + config.system.region);
         appendCliLine(String("time=") + (timeSynced ? formattedDateTime() : "not synced"));
+        appendCliLine(String("keymap=") + config.keyboard.layout + " keyboard=" + keyboard.status());
         appendCliLine(String("activeWifi=") + activeWifi + " activeSsh=" + activeSsh);
         return true;
     }
@@ -2223,7 +2277,8 @@ String configFieldValue(uint8_t field)
     if (field == 0) return config.system.deviceName;
     if (field == 1) return config.system.region;
     if (field == 2) return String(config.system.utcOffsetMinutes);
-    return config.system.ntpServer;
+    if (field == 3) return config.system.ntpServer;
+    return config.keyboard.layout;
 }
 
 void setConfigFieldValue(uint8_t field, const String& value)
@@ -2232,13 +2287,18 @@ void setConfigFieldValue(uint8_t field, const String& value)
     if (field == 1) config.system.region = value.length() ? value : "Asia/Tokyo";
     if (field == 2) config.system.utcOffsetMinutes = static_cast<int16_t>(constrain(value.toInt(), -720, 840));
     if (field == 3) config.system.ntpServer = value.length() ? value : "pool.ntp.org";
+    if (field == 4) {
+        String layout = value;
+        layout.toLowerCase();
+        config.keyboard.layout = layout == "jp" ? "jp" : "us";
+    }
 }
 
 uint8_t editFieldCount()
 {
     if (screen == Screen::WifiEdit) return 3;
     if (screen == Screen::SshEdit) return 6;
-    if (screen == Screen::ConfigEdit) return 4;
+    if (screen == Screen::ConfigEdit) return 5;
     return 0;
 }
 
@@ -2255,6 +2315,21 @@ void setCurrentEditFieldValue(const String& value)
     if (screen == Screen::WifiEdit) setWifiFieldValue(editField, value);
     if (screen == Screen::SshEdit) setSshFieldValue(editField, value);
     if (screen == Screen::ConfigEdit) setConfigFieldValue(editField, value);
+}
+
+bool isChoiceEditField()
+{
+    return screen == Screen::ConfigEdit && editField == 4;
+}
+
+void toggleChoiceEditField()
+{
+    if (!isChoiceEditField()) {
+        return;
+    }
+    config.keyboard.layout = config.keyboard.layout == "jp" ? "us" : "jp";
+    editCursor = config.keyboard.layout.length();
+    dirty = true;
 }
 
 void clampEditCursor()
@@ -2452,8 +2527,9 @@ void drawEditFields(const char* title, const char* const* labels, uint8_t count,
         else if (screen == Screen::SshEdit) rawValue = sshFieldValue(i);
         else rawValue = configFieldValue(i);
         bool secret = (screen == Screen::SshEdit && i == 4) || (screen == Screen::WifiEdit && i == 2);
+        bool choiceField = screen == Screen::ConfigEdit && i == 4;
         String value = safeValue(rawValue, secret);
-        size_t cursor = i == editField ? min(editCursor, rawValue.length()) : rawValue.length();
+        size_t cursor = (i == editField && !choiceField) ? min(editCursor, rawValue.length()) : rawValue.length();
         if (secret) cursor = min(cursor, value.length());
         String prefix = value.substring(0, cursor);
         String cursorGlyph = " ";
@@ -2472,7 +2548,7 @@ void drawEditFields(const char* title, const char* const* labels, uint8_t count,
         int textY = settingTextY(y);
         screenSprite.drawString(prefix, x, textY);
         x += screenSprite.textWidth(prefix);
-        if (i == editField && cursorVisible) {
+        if (i == editField && !choiceField && cursorVisible) {
             int cursorW = max<int>(terminalCellWidth(), screenSprite.textWidth(cursorGlyph));
             screenSprite.fillRect(x, y + 3, cursorW, settingRowH() - 10, TFT_GREEN);
             screenSprite.setTextColor(TFT_BLACK, TFT_GREEN);
@@ -2540,8 +2616,8 @@ void draw()
         static const char* const labels[] = {"Name", "Host", "Port", "User", "Password", "Term"};
         drawEditFields("Edit SSH", labels, 6, true);
     } else if (screen == Screen::ConfigEdit) {
-        static const char* const labels[] = {"Device", "Region", "UTC min", "NTP"};
-        drawEditFields("Config", labels, 4, false);
+        static const char* const labels[] = {"Device", "Region", "UTC min", "NTP", "Keymap"};
+        drawEditFields("Config", labels, 5, false);
     } else if (screen == Screen::FontList) {
         drawFontList();
     }
@@ -2752,6 +2828,7 @@ void saveEditingProfile()
             screen = Screen::SshList;
         } else if (screen == Screen::ConfigEdit) {
             startTimeSync(true);
+            keyboard.configure(config.keyboard);
             screen = Screen::Terminal;
         }
     }
@@ -3056,8 +3133,12 @@ void handleEditTouch(int, int y)
     uint8_t field = static_cast<uint8_t>((y - settingListTop()) / settingRowH());
     uint8_t maxField = editFieldCount();
     if (field < maxField) {
+        bool toggle = screen == Screen::ConfigEdit && field == 4;
         editField = field;
         setEditCursorToEnd();
+        if (toggle) {
+            toggleChoiceEditField();
+        }
         dirty = true;
     }
 }
@@ -3155,6 +3236,12 @@ void editAppendChar(char c)
         editField = (editField + 1) % maxField;
         setEditCursorToEnd();
         dirty = true;
+        return;
+    }
+    if (isChoiceEditField()) {
+        if (c == ' ' || c == '+' || c == '-') {
+            toggleChoiceEditField();
+        }
         return;
     }
 
@@ -3487,9 +3574,11 @@ void handleAction(const KeyAction& action)
         } else if (isUpKey(action)) {
             moveEditField(-1);
         } else if (isLeftKey(action)) {
-            moveEditCursor(-1);
+            if (isChoiceEditField()) toggleChoiceEditField();
+            else moveEditCursor(-1);
         } else if (isRightKey(action)) {
-            moveEditCursor(1);
+            if (isChoiceEditField()) toggleChoiceEditField();
+            else moveEditCursor(1);
         } else if (action.type == KeyActionType::Text) {
             for (size_t i = 0; i < action.text.length(); ++i) {
                 editAppendChar(action.text[i]);
@@ -3589,13 +3678,15 @@ void serialPrintHelp()
 
 void serialPrintStatus()
 {
-    Serial.printf("screen=%u wifi=%s wl=%d ssh=%s activeWifi=%u activeSsh=%u stage=%s\r\n",
+    Serial.printf("screen=%u wifi=%s wl=%d ssh=%s activeWifi=%u activeSsh=%u keymap=%s keyboard=%s stage=%s\r\n",
                   static_cast<unsigned>(screen),
                   wifiStatusText.c_str(),
                   static_cast<int>(WiFi.status()),
                   ssh.connected() ? "connected" : "disconnected",
                   static_cast<unsigned>(activeWifi),
                   static_cast<unsigned>(activeSsh),
+                  config.keyboard.layout.c_str(),
+                  keyboard.status().c_str(),
                   crashStage);
 }
 

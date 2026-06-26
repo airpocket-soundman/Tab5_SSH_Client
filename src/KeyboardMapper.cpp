@@ -13,6 +13,7 @@ constexpr uint8_t HID_UP = 0x52;
 constexpr uint8_t HID_DOWN = 0x51;
 constexpr uint8_t HID_LEFT = 0x50;
 constexpr uint8_t HID_RIGHT = 0x4F;
+
 }
 
 void KeyboardMapper::configure(const KeyboardConfig& config)
@@ -84,16 +85,12 @@ KeyAction KeyboardMapper::mapHid(uint8_t modifier, uint8_t keycode) const
         return {KeyActionType::Text, String(c), 0};
     }
 
-    static const char normal[] = "1234567890-=[]\\#;'`,./";
-    static const char shifted[] = "!@#$%^&*()_+{}|~:\"~<>?";
-    if (keycode >= 0x1E && keycode <= 0x38) {
-        const size_t index = keycode - 0x1E;
-        if (index < strlen(normal)) {
-            if (ctrl && normal[index] == '[') {
-                return {KeyActionType::Text, String(static_cast<char>(0x1B)), 0};
-            }
-            return {KeyActionType::Text, String(shift ? shifted[index] : normal[index]), 0};
+    char c = translateHidPrintable(keycode, shift);
+    if (c) {
+        if (ctrl && c == '[') {
+            return {KeyActionType::Text, String(static_cast<char>(0x1B)), 0};
         }
+        return {KeyActionType::Text, String(c), 0};
     }
 
     return {};
@@ -112,4 +109,50 @@ char KeyboardMapper::translatePrintable(char c) const
         }
     }
     return c;
+}
+
+char KeyboardMapper::translateHidPrintable(uint8_t keycode, bool shift) const
+{
+    static constexpr char jpShifted[] = "!\"#$%&'() =~`{}+*<>?";
+    const bool jp = _config.layout == "jp";
+    if (keycode >= 0x1E && keycode <= 0x27) {
+        static constexpr char usShiftedDigits[] = "!@#$%^&*()";
+        char c = shift ? (jp ? jpShifted[keycode - 0x1E] : usShiftedDigits[keycode - 0x1E])
+                       : static_cast<char>('1' + keycode - 0x1E);
+        return keycode == 0x27 && !shift ? '0' : c;
+    }
+    if (jp) {
+        switch (keycode) {
+            case 0x2D: return shift ? '=' : '-';
+            case 0x2E: return shift ? '~' : '^';
+            case 0x2F: return shift ? '`' : '@';
+            case 0x30: return shift ? '{' : '[';
+            case 0x31: return shift ? '}' : ']';
+            case 0x32: return shift ? '}' : ']';
+            case 0x33: return shift ? '+' : ';';
+            case 0x34: return shift ? '*' : ':';
+            case 0x35: return shift ? '~' : '`';
+            case 0x36: return shift ? '<' : ',';
+            case 0x37: return shift ? '>' : '.';
+            case 0x38: return shift ? '?' : '/';
+            case 0x87: return '\\';
+            case 0x89: return '\\';
+            default: return 0;
+        }
+    }
+    switch (keycode) {
+        case 0x2D: return shift ? '_' : '-';
+        case 0x2E: return shift ? '+' : '=';
+        case 0x2F: return shift ? '{' : '[';
+        case 0x30: return shift ? '}' : ']';
+        case 0x31: return shift ? '|' : '\\';
+        case 0x32: return shift ? '|' : '\\';
+        case 0x33: return shift ? ':' : ';';
+        case 0x34: return shift ? '"' : '\'';
+        case 0x35: return shift ? '~' : '`';
+        case 0x36: return shift ? '<' : ',';
+        case 0x37: return shift ? '>' : '.';
+        case 0x38: return shift ? '?' : '/';
+        default: return 0;
+    }
 }
