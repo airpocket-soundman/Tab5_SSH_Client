@@ -1887,12 +1887,12 @@ bool handlePythonCliCommand(const String& command, const String& lower)
         appendCliLine("  python <sd.py>");
         appendCliLine("  python -c <statement>");
         appendCliLine("  python --reset");
-        appendCliLine("GPIO subset: Pin, pin(), digitalWrite(), digitalRead(), blink()");
+        appendCliLine("Runs the embedded MicroPython VM; scripts are loaded from microSD.");
         return true;
     }
     if (lower == "python") {
         pythonReplMode = true;
-        appendCliLine("MicroPython-compatible REPL subset. Type exit() to return.");
+        appendCliLine("MicroPython REPL. Type exit() to return.");
         return true;
     }
     if (lower == "python --reset") {

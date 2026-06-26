@@ -1,0 +1,16 @@
+{
+  "name": "micropython_embed",
+  "version": "1.0.0",
+  "build": {
+    "includeDir": ".",
+    "srcDir": ".",
+    "flags": [
+      "-I.",
+      "-Ipy",
+      "-Igenhdr",
+      "-Iport",
+      "-Ishared/runtime",
+      "-std=gnu99"
+    ]
+  }
+}

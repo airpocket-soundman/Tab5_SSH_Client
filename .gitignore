@@ -16,5 +16,6 @@
 .env.*
 secrets/
 local/
+external/
 data/profiles.local.json
 dist/
