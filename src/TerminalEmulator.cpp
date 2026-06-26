@@ -24,6 +24,8 @@ TerminalEmulator::Cell BlankCell(uint32_t fg = 7, uint32_t bg = 0)
     cell.bg = bg;
     cell.bold = false;
     cell.inverse = false;
+    cell.wide = false;
+    cell.continuation = false;
     cell.dirty = true;
     return cell;
 }
@@ -97,12 +99,14 @@ void TerminalEmulator::resize(size_t columns, size_t rows)
     _scrollTop = 0;
     _scrollBottom = _rows ? _rows - 1 : 0;
     _wrapPending = false;
+    clearScrollback();
     markAllDirty();
 }
 
 void TerminalEmulator::reset()
 {
     clear();
+    clearScrollback();
     _alternate = false;
     _cursorVisible = true;
     _state = State::Ground;
@@ -150,6 +154,62 @@ const TerminalEmulator::Cell& TerminalEmulator::cell(size_t col, size_t row) con
     return buf[row * _cols + col];
 }
 
+const TerminalEmulator::Cell& TerminalEmulator::displayCell(size_t col, size_t row) const
+{
+    static Cell blank;
+    if (col >= _cols || row >= _rows || _alternate || _scrollbackOffset == 0) {
+        return cell(col, row);
+    }
+
+    const size_t historyRows = scrollbackRows();
+    const size_t totalRows = historyRows + _rows;
+    if (totalRows <= _rows) {
+        return cell(col, row);
+    }
+
+    const size_t maxOffset = totalRows - _rows;
+    const size_t offset = std::min(_scrollbackOffset, maxOffset);
+    const size_t firstRow = totalRows - _rows - offset;
+    const size_t displayRow = firstRow + row;
+    if (displayRow < historyRows) {
+        const size_t index = displayRow * _cols + col;
+        return index < _scrollback.size() ? _scrollback[index] : blank;
+    }
+    return cell(col, displayRow - historyRows);
+}
+
+void TerminalEmulator::scrollback(int delta)
+{
+    if (_alternate || delta == 0) {
+        return;
+    }
+    const size_t maxOffset = scrollbackRows();
+    int next = static_cast<int>(_scrollbackOffset) + delta;
+    if (next < 0) {
+        next = 0;
+    }
+    if (next > static_cast<int>(maxOffset)) {
+        next = static_cast<int>(maxOffset);
+    }
+    if (_scrollbackOffset != static_cast<size_t>(next)) {
+        _scrollbackOffset = static_cast<size_t>(next);
+        markAllDirty();
+    }
+}
+
+void TerminalEmulator::scrollbackToBottom()
+{
+    if (_scrollbackOffset) {
+        _scrollbackOffset = 0;
+        markAllDirty();
+    }
+}
+
+size_t TerminalEmulator::scrollbackRows() const
+{
+    return _cols ? _scrollback.size() / _cols : 0;
+}
+
 void TerminalEmulator::markAllDirty()
 {
     for (auto& cell : _main) cell.dirty = true;
@@ -187,6 +247,7 @@ void TerminalEmulator::useAlternate(bool enabled)
         _savedRow = _cursorRow;
     }
     _alternate = enabled;
+    scrollbackToBottom();
     if (enabled) {
         _cursorCol = 0;
         _cursorRow = 0;
@@ -244,22 +305,40 @@ void TerminalEmulator::putGlyph(const String& glyph, bool wide)
         carriageReturn();
         newline();
     }
+    if (wide && _cursorCol + 1 >= _cols) {
+        carriageReturn();
+        newline();
+    }
     Cell& cell = mutableCell(_cursorCol, _cursorRow);
+
+    if (cell.continuation && _cursorCol > 0) {
+        Cell& prev = mutableCell(_cursorCol - 1, _cursorRow);
+        prev = BlankCell(_fg, _bg);
+        markDirtyWithNeighbors(_cursorCol - 1, _cursorRow);
+    } else if (cell.wide && _cursorCol + 1 < _cols) {
+        Cell& next = mutableCell(_cursorCol + 1, _cursorRow);
+        next = BlankCell(_fg, _bg);
+        markDirtyWithNeighbors(_cursorCol + 1, _cursorRow);
+    }
+
     cell.ch = glyph.length() ? glyph : " ";
     cell.fg = _fg;
     cell.bg = _bg;
     cell.bold = _bold;
     cell.inverse = _inverse;
+    cell.wide = wide && _cursorCol + 1 < _cols;
+    cell.continuation = false;
     markDirtyWithNeighbors(_cursorCol, _cursorRow);
 
-    if (wide && _cursorCol + 1 < _cols) {
+    if (cell.wide) {
         Cell& next = mutableCell(_cursorCol + 1, _cursorRow);
         next = BlankCell(_fg, _bg);
         next.inverse = _inverse;
+        next.continuation = true;
         markDirtyWithNeighbors(_cursorCol + 1, _cursorRow);
     }
 
-    size_t advance = wide ? 2 : 1;
+    size_t advance = cell.wide ? 2 : 1;
     if (_cursorCol + advance >= _cols) {
         _cursorCol = _cols - 1;
         _wrapPending = true;
@@ -273,6 +352,16 @@ void TerminalEmulator::scrollUp(size_t top, size_t bottom, size_t count)
     if (top >= _rows || bottom >= _rows || top > bottom || count == 0) return;
     auto& buf = _alternate ? _alt : _main;
     count = std::min(count, bottom - top + 1);
+    const bool fullNormalScroll = !_alternate && top == 0 && bottom == _rows - 1;
+    const bool viewingHistory = _scrollbackOffset > 0;
+    if (fullNormalScroll) {
+        for (size_t row = 0; row < count; ++row) {
+            pushScrollbackRow(row);
+        }
+        if (viewingHistory) {
+            _scrollbackOffset = std::min(_scrollbackOffset + count, scrollbackRows());
+        }
+    }
     for (size_t row = top; row + count <= bottom; ++row) {
         for (size_t col = 0; col < _cols; ++col) {
             buf[row * _cols + col] = buf[(row + count) * _cols + col];
@@ -299,6 +388,35 @@ void TerminalEmulator::clearCells()
     auto& buf = _alternate ? _alt : _main;
     for (auto& cell : buf) {
         cell = BlankCell();
+    }
+}
+
+void TerminalEmulator::clearScrollback()
+{
+    _scrollback.clear();
+    _scrollbackOffset = 0;
+}
+
+void TerminalEmulator::pushScrollbackRow(size_t row)
+{
+    if (row >= _rows || _cols == 0) {
+        return;
+    }
+    const auto& buf = _main;
+    const size_t first = row * _cols;
+    if (first + _cols > buf.size()) {
+        return;
+    }
+    for (size_t col = 0; col < _cols; ++col) {
+        Cell copy = buf[first + col];
+        copy.dirty = true;
+        _scrollback.push_back(copy);
+    }
+    while (scrollbackRows() > _maxScrollbackRows) {
+        _scrollback.erase(_scrollback.begin(), _scrollback.begin() + _cols);
+        if (_scrollbackOffset > 0) {
+            --_scrollbackOffset;
+        }
     }
 }
 

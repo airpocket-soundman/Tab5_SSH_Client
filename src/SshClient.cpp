@@ -6,28 +6,35 @@
 #endif
 
 extern void tab5SetCrashStage(const char* stage);
+extern void tab5SshProgress(const char* stage);
+
+void reportSshStage(const char* stage)
+{
+    tab5SetCrashStage(stage);
+    tab5SshProgress(stage);
+}
 
 bool SshClient::connect(const SshProfile& profile, String& error, int columns, int rows)
 {
 #if ENABLE_SSH
-    tab5SetCrashStage("ssh.libssh_begin");
+    reportSshStage("ssh.libssh_begin");
     static bool libsshStarted = false;
     if (!libsshStarted) {
         libssh_begin();
         libsshStarted = true;
     }
 
-    tab5SetCrashStage("ssh.disconnect");
+    reportSshStage("ssh.disconnect");
     disconnect();
 
-    tab5SetCrashStage("ssh_new");
+    reportSshStage("ssh_new");
     ssh_session session = ssh_new();
     if (!session) {
         error = "ssh_new failed";
         return false;
     }
 
-    tab5SetCrashStage("ssh_options");
+    reportSshStage("ssh_options");
     const int verbosity = SSH_LOG_NOLOG;
     ssh_options_set(session, SSH_OPTIONS_HOST, profile.host.c_str());
     const int port = profile.port;
@@ -35,14 +42,14 @@ bool SshClient::connect(const SshProfile& profile, String& error, int columns, i
     ssh_options_set(session, SSH_OPTIONS_USER, profile.user.c_str());
     ssh_options_set(session, SSH_OPTIONS_LOG_VERBOSITY, &verbosity);
 
-    tab5SetCrashStage("ssh_connect");
+    reportSshStage("ssh_connect");
     if (ssh_connect(session) != SSH_OK) {
         error = ssh_get_error(session);
         ssh_free(session);
         return false;
     }
 
-    tab5SetCrashStage("ssh_auth_password");
+    reportSshStage("ssh_auth_password");
     int auth = ssh_userauth_password(session, nullptr, profile.password.c_str());
     if (auth != SSH_AUTH_SUCCESS) {
         error = ssh_get_error(session);
@@ -51,7 +58,7 @@ bool SshClient::connect(const SshProfile& profile, String& error, int columns, i
         return false;
     }
 
-    tab5SetCrashStage("ssh_channel_new");
+    reportSshStage("ssh_channel_new");
     ssh_channel channel = ssh_channel_new(session);
     if (!channel) {
         error = "ssh_channel_new failed";
@@ -60,7 +67,7 @@ bool SshClient::connect(const SshProfile& profile, String& error, int columns, i
         return false;
     }
 
-    tab5SetCrashStage("ssh_pty_shell");
+    reportSshStage("ssh_pty_shell");
     if (ssh_channel_open_session(channel) != SSH_OK ||
         ssh_channel_request_pty_size(channel, profile.terminal.c_str(), columns, rows) != SSH_OK ||
         ssh_channel_request_shell(channel) != SSH_OK) {
@@ -74,7 +81,7 @@ bool SshClient::connect(const SshProfile& profile, String& error, int columns, i
     ssh_set_blocking(session, 0);
     _session = session;
     _channel = channel;
-    tab5SetCrashStage("ssh_ready");
+    reportSshStage("ssh_ready");
     return true;
 #else
     (void)profile;
@@ -137,8 +144,23 @@ bool SshClient::write(const uint8_t* data, size_t len)
     if (!connected()) {
         return false;
     }
-    int n = ssh_channel_write(static_cast<ssh_channel>(_channel), data, len);
-    return n == static_cast<int>(len);
+    ssh_session session = static_cast<ssh_session>(_session);
+    ssh_channel channel = static_cast<ssh_channel>(_channel);
+    ssh_set_blocking(session, 0);
+    size_t sent = 0;
+    uint32_t start = millis();
+    while (sent < len && millis() - start < 30) {
+        int n = ssh_channel_write(channel, data + sent, len - sent);
+        if (n == SSH_AGAIN) {
+            delay(1);
+            continue;
+        }
+        if (n <= 0) {
+            return false;
+        }
+        sent += static_cast<size_t>(n);
+    }
+    return sent == len;
 #else
     (void)data;
     (void)len;

@@ -11,6 +11,8 @@ public:
         uint32_t bg{0};
         bool bold{false};
         bool inverse{false};
+        bool wide{false};
+        bool continuation{false};
         bool dirty{true};
     };
 
@@ -28,6 +30,11 @@ public:
     bool cursorVisible() const { return _cursorVisible; }
     bool alternateScreen() const { return _alternate; }
     const Cell& cell(size_t col, size_t row) const;
+    const Cell& displayCell(size_t col, size_t row) const;
+    void scrollback(int delta);
+    void scrollbackToBottom();
+    size_t scrollbackOffset() const { return _scrollbackOffset; }
+    size_t scrollbackRows() const;
     void markAllDirty();
     void markCursorDirty();
     void clearDirty();
@@ -52,6 +59,8 @@ private:
     void scrollUp(size_t top, size_t bottom, size_t count);
     void clearRow(size_t row, size_t fromCol, size_t toCol);
     void clearCells();
+    void clearScrollback();
+    void pushScrollbackRow(size_t row);
     void insertCells(size_t count);
     void deleteCells(size_t count);
     void insertLines(size_t count);
@@ -91,4 +100,7 @@ private:
     std::vector<int> _params;
     std::vector<Cell> _main;
     std::vector<Cell> _alt;
+    std::vector<Cell> _scrollback;
+    size_t _scrollbackOffset{0};
+    size_t _maxScrollbackRows{800};
 };

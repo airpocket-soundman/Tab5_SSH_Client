@@ -25,10 +25,18 @@ struct KeyboardConfig {
     bool swapCtrlCaps{false};
 };
 
+struct SystemConfig {
+    String deviceName{"tab5"};
+    String region{"Asia/Tokyo"};
+    int16_t utcOffsetMinutes{540};
+    String ntpServer{"pool.ntp.org"};
+};
+
 struct AppConfig {
     std::vector<WifiProfile> wifi;
     std::vector<SshProfile> ssh;
     KeyboardConfig keyboard;
+    SystemConfig system;
     size_t activeWifi{0};
     size_t activeSsh{0};
 };

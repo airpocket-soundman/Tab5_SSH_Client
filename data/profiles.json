@@ -29,5 +29,11 @@
     "terminalFont": "mono12",
     "terminalLineStep": 15,
     "swapCtrlCaps": false
+  },
+  "system": {
+    "deviceName": "tab5",
+    "region": "Asia/Tokyo",
+    "utcOffsetMinutes": 540,
+    "ntpServer": "pool.ntp.org"
   }
 }

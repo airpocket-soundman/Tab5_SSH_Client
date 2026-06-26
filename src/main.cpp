@@ -4,6 +4,7 @@
 #include "TerminalBuffer.hpp"
 #include "TerminalEmulator.hpp"
 #include "WifiProfiles.hpp"
+#include "fonts/TerminusBitmap.hpp"
 
 #include <M5Unified.h>
 #include <WiFi.h>
@@ -11,6 +12,7 @@
 #include <cctype>
 #include <cstring>
 #include <esp_system.h>
+#include <time.h>
 
 namespace {
 AppConfig config;
@@ -31,6 +33,7 @@ enum class Screen : uint8_t {
     SshList,
     SshEdit,
     FontList,
+    ConfigEdit,
 };
 
 enum class WifiConnectState : uint8_t {
@@ -63,6 +66,7 @@ size_t activeWifi = 0;
 size_t activeSsh = 0;
 size_t editIndex = 0;
 uint8_t editField = 0;
+size_t editCursor = 0;
 bool editIsNew = false;
 uint32_t lastDraw = 0;
 bool dirty = true;
@@ -90,21 +94,27 @@ volatile bool wifiWorkerBusy = false;
 volatile bool wifiWorkerDone = false;
 bool wifiDirectBeginPending = false;
 bool wifiPinsConfigured = false;
+bool timeSyncStarted = false;
+bool timeSynced = false;
+uint32_t lastTimeSyncAttempt = 0;
 String serialCommand;
 String commandLine;
 size_t commandCursor = 0;
 std::vector<String> commandHistory;
 size_t commandHistoryIndex = 0;
+int touchScrollRemainderY = 0;
+bool touchScrollActive = false;
 bool remoteLineMode = false;
 uint32_t lastCursorBlink = 0;
 bool cursorVisible = true;
+uint32_t lastSshReceive = 0;
 RTC_DATA_ATTR uint32_t crashStageMagic = 0;
 RTC_DATA_ATTR char crashStage[64] = "";
 
 constexpr bool ForceFixedWifiForTest = false;
 constexpr const char* FixedWifiSsid = "kumakero2.4";
 constexpr const char* FixedWifiPassword = "4roses6126";
-constexpr const char* LocalPrompt = "[tab5]  ";
+constexpr const char* LocalPrompt = "[tab5] ";
 
 constexpr int HeaderH = 44;
 constexpr int HeaderTouchH = HeaderH * 3;
@@ -114,7 +124,8 @@ constexpr Rect BtnTerminal{4, 4, 72, 36};
 constexpr Rect BtnWifi{82, 4, 72, 36};
 constexpr Rect BtnSsh{160, 4, 72, 36};
 constexpr Rect BtnFont{238, 4, 72, 36};
-constexpr Rect BtnConnect{316, 4, 80, 36};
+constexpr Rect BtnConfig{316, 4, 72, 36};
+constexpr Rect BtnConnect{402, 4, 80, 36};
 constexpr Rect BtnAdd{402, 4, 72, 36};
 constexpr Rect BtnMinus{480, 4, 72, 36};
 constexpr Rect BtnPlus{558, 4, 72, 36};
@@ -129,6 +140,16 @@ constexpr Rect FontSaveBtn{256, HeaderH + ContentTopGap, 150, 48};
 
 bool connectSshProfile(const SshProfile& profile);
 bool parseSshCommand(const String& line, SshProfile& profile, String& error);
+void connectActiveSsh();
+bool parseTrailingIndex(const String& command, size_t prefixLen, size_t& index);
+void configureTerminal();
+void draw();
+bool saveConfig();
+bool sendSshText(const String& text);
+void appendStatus(const String& message);
+void startTimeSync(bool force = false);
+void setWifiStatus(const String& message);
+bool drawFallbackUnicodeGlyph(uint32_t cp, int x, int y, int w, int h, uint16_t fg, uint16_t bg);
 
 bool headerButtonContains(const Rect& r, int px, int py)
 {
@@ -142,6 +163,7 @@ const Rect* headerButtonAt(size_t index)
     if (index == i++) return &BtnWifi;
     if (index == i++) return &BtnSsh;
     if (index == i++) return &BtnFont;
+    if (index == i++) return &BtnConfig;
 
     if (screen == Screen::Terminal) {
         if (index == i++) return &BtnConnect;
@@ -152,6 +174,8 @@ const Rect* headerButtonAt(size_t index)
     } else if (screen == Screen::SshEdit) {
         if (index == i++) return &BtnSave;
         if (index == i++) return &BtnDelete;
+    } else if (screen == Screen::ConfigEdit) {
+        if (index == i++) return &BtnSave;
     }
     return nullptr;
 }
@@ -183,6 +207,8 @@ void focusCurrentScreenButton()
         focusedHeaderButton = 2;
     } else if (screen == Screen::FontList) {
         focusedHeaderButton = 3;
+    } else if (screen == Screen::ConfigEdit) {
+        focusedHeaderButton = 4;
     } else {
         focusedHeaderButton = 0;
     }
@@ -192,9 +218,9 @@ void focusCurrentScreenButton()
 struct TerminalFontOption {
     const char* id;
     const char* label;
-    const lgfx::IFont* font;
     const lgfx::IFont* japaneseFont;
     uint8_t cellW;
+    uint8_t cellH;
     uint8_t settingsLineHeight;
     uint8_t defaultLineStep;
     uint8_t legacyLineStep;
@@ -202,10 +228,10 @@ struct TerminalFontOption {
 };
 
 constexpr TerminalFontOption TerminalFonts[] = {
-    {"mono9", "FreeMono 9pt", &fonts::FreeMono9pt7b, &fonts::lgfxJapanGothic_16, 11, 18, 20, 12, 23},
-    {"mono12", "FreeMono 12pt", &fonts::FreeMono12pt7b, &fonts::lgfxJapanGothic_20, 14, 24, 26, 15, 30},
-    {"mono18", "FreeMono 18pt", &fonts::FreeMono18pt7b, &fonts::lgfxJapanGothic_28, 21, 35, 38, 23, 44},
-    {"mono24", "FreeMono 24pt", &fonts::FreeMono24pt7b, &fonts::lgfxJapanGothic_36, 28, 47, 50, 30, 59},
+    {"mono9", "Terminus 8x16", &fonts::lgfxJapanGothic_16, 8, 16, 18, 18, 12, 20},
+    {"mono12", "Terminus 10x20", &fonts::lgfxJapanGothic_20, 10, 20, 22, 22, 15, 26},
+    {"mono18", "Terminus 14x28", &fonts::lgfxJapanGothic_28, 14, 28, 30, 30, 23, 38},
+    {"mono24", "Terminus 18x36", &fonts::lgfxJapanGothic_36, 18, 36, 38, 38, 30, 50},
 };
 
 const TerminalFontOption& terminalFont()
@@ -236,27 +262,63 @@ void setUiFont()
 
 void setTerminalFont()
 {
-    screenSprite.setFont(terminalFont().font);
+    screenSprite.setFont(terminalFont().japaneseFont);
     screenSprite.setTextSize(1);
 }
 
 int terminalCellWidth()
 {
-    setTerminalFont();
-    int w = screenSprite.textWidth("M");
-    static const char sample[] = " !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~";
-    for (size_t i = 0; i < strlen(sample); ++i) {
-        char text[2] = {sample[i], 0};
-        w = max<int>(w, screenSprite.textWidth(text));
-    }
-    return max<int>(terminalFont().cellW, w);
+    return terminalFont().cellW;
 }
 
 int terminalFontHeight(bool japanese)
 {
-    screenSprite.setFont(japanese ? terminalFont().japaneseFont : terminalFont().font);
+    if (!japanese) {
+        return terminalFont().cellH;
+    }
+    screenSprite.setFont(terminalFont().japaneseFont);
     screenSprite.setTextSize(1);
     return screenSprite.fontHeight();
+}
+
+const TerminusBitmap::Font& terminalBitmapFont()
+{
+    return TerminusBitmap::fontForHeight(terminalFont().cellH);
+}
+
+bool fontSupportsCodepoint(const lgfx::IFont* font, uint32_t cp)
+{
+    if (!font || cp > 0xFFFF) {
+        return false;
+    }
+    lgfx::FontMetrics metrics;
+    font->getDefaultMetric(&metrics);
+    return font->updateFontMetric(&metrics, static_cast<uint16_t>(cp));
+}
+
+const lgfx::IFont* fontForTerminalCodepoint(uint32_t cp)
+{
+    struct FontCacheEntry {
+        uint32_t cp;
+        const lgfx::IFont* fallback;
+        const lgfx::IFont* resolved;
+        bool valid;
+    };
+    static FontCacheEntry cache[96] = {};
+
+    const lgfx::IFont* fallback = terminalFont().japaneseFont;
+    FontCacheEntry& entry = cache[cp % (sizeof(cache) / sizeof(cache[0]))];
+    if (entry.valid && entry.cp == cp && entry.fallback == fallback) {
+        return entry.resolved;
+    }
+
+    const lgfx::IFont* resolved = nullptr;
+    if (fontSupportsCodepoint(fallback, cp)) {
+        resolved = fallback;
+    }
+
+    entry = {cp, fallback, resolved, true};
+    return resolved;
 }
 
 uint16_t rgb565(uint8_t r, uint8_t g, uint8_t b)
@@ -305,6 +367,16 @@ uint16_t terminalColor(uint32_t color, bool bold)
 
 void migrateLegacyLineStep()
 {
+    bool knownFont = false;
+    for (const auto& option : TerminalFonts) {
+        if (config.keyboard.terminalFont == option.id) {
+            knownFont = true;
+            break;
+        }
+    }
+    if (!knownFont || config.keyboard.terminalFont.startsWith("efont")) {
+        config.keyboard.terminalFont = "mono12";
+    }
     const auto& font = terminalFont();
     int minStep = max(terminalFontHeight(false), terminalFontHeight(true));
     if (config.keyboard.terminalLineStep == font.legacyLineStep ||
@@ -312,18 +384,6 @@ void migrateLegacyLineStep()
         config.keyboard.terminalLineStep < minStep) {
         config.keyboard.terminalLineStep = static_cast<uint8_t>(max<int>(font.defaultLineStep, minStep));
     }
-}
-
-void setTerminalFontForLine(const String& line)
-{
-    for (size_t i = 0; i < line.length(); ++i) {
-        if (static_cast<uint8_t>(line[i]) >= 0x80) {
-            screenSprite.setFont(terminalFont().japaneseFont);
-            screenSprite.setTextSize(1);
-            return;
-        }
-    }
-    setTerminalFont();
 }
 
 void setSettingsFontForLine(const String& line = "")
@@ -335,7 +395,7 @@ void setSettingsFontForLine(const String& line = "")
             return;
         }
     }
-    screenSprite.setFont(terminalFont().font);
+    screenSprite.setFont(&fonts::AsciiFont8x16);
     screenSprite.setTextSize(1);
 }
 
@@ -347,16 +407,6 @@ int settingRowH()
 int settingListTop()
 {
     return BodyBtn1.y + BodyBtn1.h + 18;
-}
-
-bool hasJapaneseBytes(const String& text)
-{
-    for (size_t i = 0; i < text.length(); ++i) {
-        if (static_cast<uint8_t>(text[i]) >= 0x80) {
-            return true;
-        }
-    }
-    return false;
 }
 
 uint8_t utf8CharLength(uint8_t c)
@@ -388,6 +438,122 @@ uint32_t utf8Codepoint(const String& text)
                (static_cast<uint8_t>(text[3]) & 0x3F);
     }
     return c0;
+}
+
+uint32_t utf8CodepointAt(const String& text, size_t index)
+{
+    if (index >= text.length()) return 0;
+    const uint8_t c0 = static_cast<uint8_t>(text[index]);
+    if (c0 < 0x80) return c0;
+    if ((c0 & 0xE0) == 0xC0 && index + 1 < text.length()) {
+        return ((c0 & 0x1F) << 6) | (static_cast<uint8_t>(text[index + 1]) & 0x3F);
+    }
+    if ((c0 & 0xF0) == 0xE0 && index + 2 < text.length()) {
+        return ((c0 & 0x0F) << 12) |
+               ((static_cast<uint8_t>(text[index + 1]) & 0x3F) << 6) |
+               (static_cast<uint8_t>(text[index + 2]) & 0x3F);
+    }
+    if ((c0 & 0xF8) == 0xF0 && index + 3 < text.length()) {
+        return ((c0 & 0x07) << 18) |
+               ((static_cast<uint8_t>(text[index + 1]) & 0x3F) << 12) |
+               ((static_cast<uint8_t>(text[index + 2]) & 0x3F) << 6) |
+               (static_cast<uint8_t>(text[index + 3]) & 0x3F);
+    }
+    return c0;
+}
+
+bool isJapaneseTerminalCodepoint(uint32_t cp)
+{
+    return (cp >= 0x3000 && cp <= 0x30FF) ||
+           (cp >= 0x31F0 && cp <= 0x31FF) ||
+           (cp >= 0x3400 && cp <= 0x9FFF) ||
+           (cp >= 0xF900 && cp <= 0xFAFF) ||
+           (cp >= 0xFF00 && cp <= 0xFFEF);
+}
+
+int terminalCodepointWidth(uint32_t cp)
+{
+    if (cp == 0) return 0;
+    if (cp < 0x80 || TerminusBitmap::hasGlyph(terminalBitmapFont(), cp)) {
+        return terminalCellWidth();
+    }
+    if (isJapaneseTerminalCodepoint(cp)) {
+        return terminalCellWidth() * 2;
+    }
+    return terminalCellWidth();
+}
+
+int terminalTextWidth(const String& text)
+{
+    int width = 0;
+    for (size_t i = 0; i < text.length();) {
+        uint8_t c = static_cast<uint8_t>(text[i]);
+        uint32_t cp = utf8CodepointAt(text, i);
+        width += terminalCodepointWidth(cp);
+        i += utf8CharLength(c);
+    }
+    return width;
+}
+
+bool drawTerminusGlyph(uint32_t cp, int x, int lineTop, int lineStep, uint16_t fg)
+{
+    const auto& font = terminalBitmapFont();
+    if (!TerminusBitmap::hasGlyph(font, cp)) {
+        return false;
+    }
+    int y = lineTop + max<int>(0, (lineStep - font.targetH) / 2);
+    return TerminusBitmap::drawGlyph(screenSprite, font, cp, x, y, fg);
+}
+
+int drawTerminalText(const String& text, int x, int lineTop, int lineStep, uint16_t fg, uint16_t bg)
+{
+    int cursorX = x;
+    for (size_t i = 0; i < text.length();) {
+        uint8_t c = static_cast<uint8_t>(text[i]);
+        size_t next = i + utf8CharLength(c);
+        String glyph = text.substring(i, next);
+        uint32_t cp = utf8CodepointAt(text, i);
+        if (drawTerminusGlyph(cp, cursorX, lineTop, lineStep, fg)) {
+            cursorX += terminalCellWidth();
+        } else if (isJapaneseTerminalCodepoint(cp)) {
+            screenSprite.setFont(terminalFont().japaneseFont);
+            screenSprite.setTextSize(1);
+            screenSprite.setTextColor(fg, bg);
+            int textY = lineTop + max<int>(0, (lineStep - screenSprite.fontHeight()) / 2);
+            screenSprite.drawString(glyph, cursorX, textY);
+            cursorX += terminalCellWidth() * 2;
+        } else if (drawFallbackUnicodeGlyph(cp, cursorX, lineTop, terminalCellWidth(), lineStep, fg, bg)) {
+            cursorX += terminalCellWidth();
+        } else {
+            screenSprite.setFont(terminalFont().japaneseFont);
+            screenSprite.setTextSize(1);
+            screenSprite.setTextColor(fg, bg);
+            int textY = lineTop + max<int>(0, (lineStep - screenSprite.fontHeight()) / 2);
+            screenSprite.drawString(glyph, cursorX, textY);
+            cursorX += terminalCellWidth();
+        }
+        i = next;
+    }
+    return cursorX - x;
+}
+
+void drawTightJapaneseRun(const String& text, int x, int y, int w, int lineStep, uint16_t fg, uint16_t bg)
+{
+    screenSprite.setClipRect(x, y, w, lineStep);
+    screenSprite.setFont(terminalFont().japaneseFont);
+    screenSprite.setTextSize(1);
+    screenSprite.setTextColor(fg, bg);
+    const int textY = y + max<int>(0, (lineStep - screenSprite.fontHeight()) / 2);
+    const int tighten = max<int>(1, terminalCellWidth() / 8);
+    int cursorX = x;
+    for (size_t i = 0; i < text.length();) {
+        size_t next = i + utf8CharLength(static_cast<uint8_t>(text[i]));
+        String glyph = text.substring(i, next);
+        screenSprite.drawString(glyph, cursorX, textY);
+        cursorX += max<int>(1, screenSprite.textWidth(glyph) - tighten);
+        i = next;
+    }
+    screenSprite.clearClipRect();
 }
 
 bool drawBlockGlyph(uint32_t cp, int x, int y, int w, int h, uint16_t fg, uint16_t bg)
@@ -469,6 +635,12 @@ bool drawBoxGlyph(uint32_t cp, int x, int y, int w, int h, uint16_t fg)
     auto vline = [&](int y1, int y2) {
         screenSprite.fillRect(cx - thick / 2, min(y1, y2), thick, abs(y2 - y1) + 1, fg);
     };
+    auto junction = [&](bool left, bool right, bool up, bool down) {
+        if (left) hline(x, cx);
+        if (right) hline(cx, x + w - 1);
+        if (up) vline(y, cy);
+        if (down) vline(cy, y + h - 1);
+    };
     auto smoothCorner = [&](bool right, bool down) {
         const int insetX = max<int>(1, w / 4);
         const int insetY = max<int>(1, h / 4);
@@ -491,52 +663,311 @@ bool drawBoxGlyph(uint32_t cp, int x, int y, int w, int h, uint16_t fg)
         case 0x2510: hline(x, cx); vline(cy, y + h - 1); return true;
         case 0x2514: hline(cx, x + w - 1); vline(y, cy); return true;
         case 0x2518: hline(x, cx); vline(y, cy); return true;
+        case 0x251C: junction(false, true, true, true); return true;
+        case 0x2524: junction(true, false, true, true); return true;
+        case 0x252C: junction(true, true, false, true); return true;
+        case 0x2534: junction(true, true, true, false); return true;
+        case 0x253C: junction(true, true, true, true); return true;
+        case 0x251D:
+        case 0x251E:
+        case 0x251F:
+        case 0x2520:
+        case 0x2521:
+        case 0x2522:
+        case 0x2523:
+            junction(false, true, true, true); return true;
+        case 0x2525:
+        case 0x2526:
+        case 0x2527:
+        case 0x2528:
+        case 0x2529:
+        case 0x252A:
+        case 0x252B:
+            junction(true, false, true, true); return true;
+        case 0x252D:
+        case 0x252E:
+        case 0x252F:
+        case 0x2530:
+        case 0x2531:
+        case 0x2532:
+        case 0x2533:
+            junction(true, true, false, true); return true;
+        case 0x2535:
+        case 0x2536:
+        case 0x2537:
+        case 0x2538:
+        case 0x2539:
+        case 0x253A:
+        case 0x253B:
+            junction(true, true, true, false); return true;
+        case 0x253D:
+        case 0x253E:
+        case 0x253F:
+        case 0x2540:
+        case 0x2541:
+        case 0x2542:
+        case 0x2543:
+        case 0x2544:
+        case 0x2545:
+        case 0x2546:
+        case 0x2547:
+        case 0x2548:
+        case 0x2549:
+        case 0x254A:
+        case 0x254B:
+            junction(true, true, true, true); return true;
+        case 0x2550:
+            screenSprite.fillRect(x, cy - thick, w, thick, fg);
+            screenSprite.fillRect(x, cy + thick, w, thick, fg);
+            return true;
+        case 0x2551:
+            screenSprite.fillRect(cx - thick, y, thick, h, fg);
+            screenSprite.fillRect(cx + thick, y, thick, h, fg);
+            return true;
+        case 0x2552:
+        case 0x2553:
+        case 0x2554:
+            junction(false, true, false, true); return true;
+        case 0x2555:
+        case 0x2556:
+        case 0x2557:
+            junction(true, false, false, true); return true;
+        case 0x2558:
+        case 0x2559:
+        case 0x255A:
+            junction(false, true, true, false); return true;
+        case 0x255B:
+        case 0x255C:
+        case 0x255D:
+            junction(true, false, true, false); return true;
+        case 0x255E:
+        case 0x255F:
+        case 0x2560:
+            junction(false, true, true, true); return true;
+        case 0x2561:
+        case 0x2562:
+        case 0x2563:
+            junction(true, false, true, true); return true;
+        case 0x2564:
+        case 0x2565:
+        case 0x2566:
+            junction(true, true, false, true); return true;
+        case 0x2567:
+        case 0x2568:
+        case 0x2569:
+            junction(true, true, true, false); return true;
+        case 0x256A:
+        case 0x256B:
+        case 0x256C:
+            junction(true, true, true, true); return true;
+        case 0x2571:
+            screenSprite.drawLine(x, y + h - 1, x + w - 1, y, fg);
+            return true;
+        case 0x2572:
+            screenSprite.drawLine(x, y, x + w - 1, y + h - 1, fg);
+            return true;
+        case 0x2573:
+            screenSprite.drawLine(x, y + h - 1, x + w - 1, y, fg);
+            screenSprite.drawLine(x, y, x + w - 1, y + h - 1, fg);
+            return true;
+        case 0x2574: hline(x, cx); return true;
+        case 0x2575: vline(y, cy); return true;
+        case 0x2576: hline(cx, x + w - 1); return true;
+        case 0x2577: vline(cy, y + h - 1); return true;
         default:
             return false;
     }
 }
 
-void drawMixedTerminalLine(const String& line, int x, int lineTop, int lineHeight)
+bool isUnicodeBlank(uint32_t cp)
 {
-    if (!hasJapaneseBytes(line)) {
-        setTerminalFont();
-        int y = lineTop + max<int>(0, (lineHeight - screenSprite.fontHeight()) / 2);
-        screenSprite.drawString(line, x, y);
-        return;
+    return cp == 0x00A0 || cp == 0x1680 || cp == 0x180E ||
+           (cp >= 0x2000 && cp <= 0x200F) ||
+           cp == 0x202F || cp == 0x205F || cp == 0x3000 ||
+           (cp >= 0xFE00 && cp <= 0xFE0F) || cp == 0xFEFF;
+}
+
+bool isFallbackSymbolRange(uint32_t cp)
+{
+    return (cp >= 0x2190 && cp <= 0x21FF) || // arrows
+           (cp >= 0x2300 && cp <= 0x23FF) || // technical symbols
+           (cp >= 0x2460 && cp <= 0x24FF) || // enclosed alphanumerics
+           (cp >= 0x25A0 && cp <= 0x25FF) || // geometric shapes
+           (cp >= 0x2600 && cp <= 0x27BF) || // misc symbols and dingbats
+           (cp >= 0x2800 && cp <= 0x28FF) || // braille patterns
+           (cp >= 0xE000 && cp <= 0xF8FF) || // private-use icons, including Nerd Font
+           (cp >= 0x1F000 && cp <= 0x1FAFF); // emoji and symbol planes
+}
+
+bool drawBrailleGlyph(uint32_t cp, int x, int y, int w, int h, uint16_t fg)
+{
+    if (cp < 0x2800 || cp > 0x28FF) {
+        return false;
+    }
+    const uint8_t bits = static_cast<uint8_t>(cp - 0x2800);
+    const int dot = max<int>(1, min<int>(w, h) / 5);
+    const int left = x + max<int>(1, w / 4 - dot / 2);
+    const int right = x + max<int>(1, (w * 3) / 4 - dot / 2);
+    const int top = y + max<int>(1, h / 8);
+    const int gap = max<int>(dot + 1, (h - dot - 2) / 4);
+    auto drawDot = [&](uint8_t bit, int dx, int dy) {
+        if (bits & bit) {
+            screenSprite.fillCircle(dx + dot / 2, dy + dot / 2, max<int>(1, dot / 2), fg);
+        }
+    };
+    drawDot(0x01, left, top);
+    drawDot(0x02, left, top + gap);
+    drawDot(0x04, left, top + gap * 2);
+    drawDot(0x40, left, top + gap * 3);
+    drawDot(0x08, right, top);
+    drawDot(0x10, right, top + gap);
+    drawDot(0x20, right, top + gap * 2);
+    drawDot(0x80, right, top + gap * 3);
+    return true;
+}
+
+bool drawPowerlineGlyph(uint32_t cp, int x, int y, int w, int h, uint16_t fg, uint16_t bg)
+{
+    switch (cp) {
+        case 0xE0B0:
+        case 0xE0B1:
+            screenSprite.fillTriangle(x, y, x, y + h - 1, x + w - 1, y + h / 2, fg);
+            if (cp == 0xE0B1) {
+                screenSprite.fillTriangle(x + 2, y + 3, x + 2, y + h - 4, x + w - 4, y + h / 2, bg);
+            }
+            return true;
+        case 0xE0B2:
+        case 0xE0B3:
+            screenSprite.fillTriangle(x + w - 1, y, x + w - 1, y + h - 1, x, y + h / 2, fg);
+            if (cp == 0xE0B3) {
+                screenSprite.fillTriangle(x + w - 3, y + 3, x + w - 3, y + h - 4, x + 3, y + h / 2, bg);
+            }
+            return true;
+        default:
+            return false;
+    }
+}
+
+bool drawFallbackUnicodeGlyph(uint32_t cp, int x, int y, int w, int h, uint16_t fg, uint16_t bg)
+{
+    if (isUnicodeBlank(cp)) {
+        return true;
+    }
+    if (drawBrailleGlyph(cp, x, y, w, h, fg) || drawPowerlineGlyph(cp, x, y, w, h, fg, bg)) {
+        return true;
+    }
+    if (!isFallbackSymbolRange(cp)) {
+        return false;
     }
 
-    int cursorX = x;
-    size_t i = 0;
-    while (i < line.length()) {
-        uint8_t c = static_cast<uint8_t>(line[i]);
-        bool japaneseRun = c >= 0x80;
-        size_t start = i;
-        if (japaneseRun) {
-            i += utf8CharLength(c);
-            while (i < line.length() && static_cast<uint8_t>(line[i]) >= 0x80) {
-                i += utf8CharLength(static_cast<uint8_t>(line[i]));
-            }
-            screenSprite.setFont(terminalFont().japaneseFont);
-        } else {
-            while (i < line.length() && static_cast<uint8_t>(line[i]) < 0x80) {
-                ++i;
-            }
-            screenSprite.setFont(terminalFont().font);
+    const int pad = max<int>(1, min<int>(w, h) / 8);
+    const int cx = x + w / 2;
+    const int cy = y + h / 2;
+    const int r = max<int>(2, min<int>(w, h) / 3);
+
+    if (cp >= 0x2190 && cp <= 0x21FF) {
+        bool drawn = false;
+        if (cp == 0x2190 || cp == 0x2194) {
+            screenSprite.drawLine(x + pad, cy, x + w - pad - 1, cy, fg);
+            screenSprite.fillTriangle(x + pad, cy, x + pad + r / 2, cy - r / 2, x + pad + r / 2, cy + r / 2, fg);
+            drawn = true;
         }
-        screenSprite.setTextSize(1);
-        String part = line.substring(start, i);
-        int y = lineTop + max<int>(0, (lineHeight - screenSprite.fontHeight()) / 2);
-        screenSprite.drawString(part, cursorX, y);
-        cursorX += screenSprite.textWidth(part);
+        if (cp == 0x2192 || cp == 0x2194 || cp == 0x21D2) {
+            screenSprite.drawLine(x + pad, cy, x + w - pad - 1, cy, fg);
+            screenSprite.fillTriangle(x + w - pad - 1, cy, x + w - pad - r / 2, cy - r / 2,
+                                      x + w - pad - r / 2, cy + r / 2, fg);
+            drawn = true;
+        }
+        if (cp == 0x2191 || cp == 0x2195) {
+            screenSprite.drawLine(cx, y + pad, cx, y + h - pad - 1, fg);
+            screenSprite.fillTriangle(cx, y + pad, cx - r / 2, y + pad + r / 2, cx + r / 2, y + pad + r / 2, fg);
+            drawn = true;
+        }
+        if (cp == 0x2193 || cp == 0x2195) {
+            screenSprite.drawLine(cx, y + pad, cx, y + h - pad - 1, fg);
+            screenSprite.fillTriangle(cx, y + h - pad - 1, cx - r / 2, y + h - pad - r / 2,
+                                      cx + r / 2, y + h - pad - r / 2, fg);
+            drawn = true;
+        }
+        if (cp == 0x21B5) {
+            screenSprite.drawLine(x + w - pad - 1, y + pad, x + w - pad - 1, cy, fg);
+            screenSprite.drawLine(x + pad, cy, x + w - pad - 1, cy, fg);
+            screenSprite.fillTriangle(x + pad, cy, x + pad + r / 2, cy - r / 2, x + pad + r / 2, cy + r / 2, fg);
+            drawn = true;
+        }
+        if (!drawn) {
+            screenSprite.drawLine(x + pad, cy, x + w - pad - 1, cy, fg);
+            screenSprite.fillTriangle(x + w - pad - 1, cy, x + w - pad - r / 2, cy - r / 2,
+                                      x + w - pad - r / 2, cy + r / 2, fg);
+        }
+        return true;
     }
+
+    if (cp == 0x25CF || cp == 0x26AB || cp == 0x26AA || cp == 0x1F534 || cp == 0x1F535) {
+        screenSprite.fillCircle(cx, cy, r, fg);
+        return true;
+    }
+    if (cp == 0x25CB || cp == 0x25EF) {
+        screenSprite.drawCircle(cx, cy, r, fg);
+        return true;
+    }
+    if (cp == 0x25A0 || cp == 0x25A1 || cp == 0x25AA || cp == 0x25AB) {
+        if (cp == 0x25A0 || cp == 0x25AA) {
+            screenSprite.fillRect(x + pad, y + pad, w - pad * 2, h - pad * 2, fg);
+        } else {
+            screenSprite.drawRect(x + pad, y + pad, w - pad * 2, h - pad * 2, fg);
+        }
+        return true;
+    }
+    if (cp == 0x25B6 || cp == 0x25B8 || cp == 0x25BA || cp == 0x25C0 || cp == 0x25C2 || cp == 0x25C4) {
+        if (cp == 0x25C0 || cp == 0x25C2 || cp == 0x25C4) {
+            screenSprite.fillTriangle(x + pad, cy, x + w - pad - 1, y + pad, x + w - pad - 1, y + h - pad - 1, fg);
+        } else {
+            screenSprite.fillTriangle(x + w - pad - 1, cy, x + pad, y + pad, x + pad, y + h - pad - 1, fg);
+        }
+        return true;
+    }
+
+    if (cp >= 0x1F000 && cp <= 0x1FAFF) {
+        screenSprite.drawRoundRect(x + pad, y + pad, w - pad * 2, h - pad * 2, max<int>(2, r / 2), fg);
+        screenSprite.fillCircle(x + w / 3, y + h / 3, max<int>(1, r / 5), fg);
+        screenSprite.fillCircle(x + (w * 2) / 3, y + h / 3, max<int>(1, r / 5), fg);
+        screenSprite.drawLine(x + w / 3, y + (h * 2) / 3, x + (w * 2) / 3, y + (h * 2) / 3, fg);
+        return true;
+    }
+
+    screenSprite.drawRect(x + pad, y + pad, w - pad * 2, h - pad * 2, fg);
+    screenSprite.drawLine(x + pad, y + pad, x + w - pad - 1, y + h - pad - 1, fg);
+    screenSprite.drawLine(x + w - pad - 1, y + pad, x + pad, y + h - pad - 1, fg);
+    (void)bg;
+    return true;
+}
+
+void drawMixedTerminalLine(const String& line, int x, int lineTop, int lineHeight)
+{
+    drawTerminalText(line, x, lineTop, lineHeight, TFT_GREEN, TFT_BLACK);
 }
 
 void drawVtTerminal()
 {
+    static bool lastViewingHistory = false;
+    static size_t lastScrollbackOffset = 0;
     const int cellW = terminalCellWidth();
     const int lineStep = terminalLineStep();
     const int gridRight = 4 + static_cast<int>(vt.columns()) * cellW;
     const int gridBottom = HeaderH + static_cast<int>(vt.rows()) * lineStep;
+    const bool viewingHistory = vt.scrollbackOffset() > 0;
+    int scrollDelta = 0;
+    bool canShiftRows = false;
+
+    if (viewingHistory && lastViewingHistory) {
+        scrollDelta = static_cast<int>(vt.scrollbackOffset()) - static_cast<int>(lastScrollbackOffset);
+        canShiftRows = scrollDelta != 0 && abs(scrollDelta) < static_cast<int>(vt.rows());
+    }
+    if (!viewingHistory && lastViewingHistory) {
+        vt.markAllDirty();
+    }
+
     if (gridRight < screenSprite.width()) {
         screenSprite.fillRect(gridRight, HeaderH, screenSprite.width() - gridRight,
                               max<int>(0, min<int>(screenSprite.height(), gridBottom) - HeaderH), TFT_BLACK);
@@ -544,19 +975,28 @@ void drawVtTerminal()
     if (gridBottom < screenSprite.height()) {
         screenSprite.fillRect(0, gridBottom, screenSprite.width(), screenSprite.height() - gridBottom, TFT_BLACK);
     }
-    for (size_t row = 0; row < vt.rows(); ++row) {
+
+    if (canShiftRows) {
+        const int bodyH = max<int>(0, min<int>(screenSprite.height(), gridBottom) - HeaderH);
+        screenSprite.setClipRect(0, HeaderH, screenSprite.width(), bodyH);
+        screenSprite.scroll(0, scrollDelta * lineStep);
+        screenSprite.clearClipRect();
+    }
+
+    auto drawRow = [&](size_t row, bool force) {
         int y = HeaderH + static_cast<int>(row) * lineStep;
         if (y >= screenSprite.height()) {
-            break;
+            return;
         }
-        for (size_t col = 0; col < vt.columns(); ++col) {
+        for (size_t col = 0; col < vt.columns();) {
             int x = 4 + static_cast<int>(col) * cellW;
             if (x >= screenSprite.width()) {
                 break;
             }
-            const auto& cell = vt.cell(col, row);
-            bool cursor = vt.cursorVisible() && cursorVisible && col == vt.cursorColumn() && row == vt.cursorRow();
-            if (!cell.dirty && !cursor) {
+            const auto& cell = vt.displayCell(col, row);
+            bool cursor = !viewingHistory && cursorVisible && col == vt.cursorColumn() && row == vt.cursorRow();
+            if (!force && !cell.dirty && !cursor) {
+                ++col;
                 continue;
             }
             bool inverse = cell.inverse ^ cursor;
@@ -565,27 +1005,96 @@ void drawVtTerminal()
             if (inverse) {
                 std::swap(fg, bg);
             }
-            screenSprite.fillRect(x, y, cellW, lineStep, bg);
+            if (cell.continuation && !cursor) {
+                ++col;
+                continue;
+            }
+            const int drawW = cell.wide ? min<int>(cellW * 2, screenSprite.width() - x) : cellW;
+
+            if (cell.wide && !cursor && cell.ch != " " && isJapaneseTerminalCodepoint(utf8Codepoint(cell.ch))) {
+                size_t endCol = col;
+                String runText;
+                bool runDirty = false;
+                while (endCol < vt.columns()) {
+                    const auto& runCell = vt.displayCell(endCol, row);
+                    bool runCursor = !viewingHistory && cursorVisible && endCol == vt.cursorColumn() &&
+                                     row == vt.cursorRow();
+                    if (runCursor || !runCell.wide || runCell.continuation || runCell.ch == " " ||
+                        runCell.fg != cell.fg || runCell.bg != cell.bg || runCell.bold != cell.bold ||
+                        runCell.inverse != cell.inverse || !isJapaneseTerminalCodepoint(utf8Codepoint(runCell.ch))) {
+                        break;
+                    }
+                    runText += runCell.ch;
+                    runDirty = runDirty || runCell.dirty;
+                    endCol += 2;
+                }
+                if (endCol > col) {
+                    if (force || runDirty) {
+                        const int runW = min<int>((endCol - col) * cellW, screenSprite.width() - x);
+                        screenSprite.fillRect(x, y, runW, lineStep, bg);
+                        drawTightJapaneseRun(runText, x, y, runW, lineStep, fg, bg);
+                    }
+                    col = endCol;
+                    continue;
+                }
+            }
+
+            screenSprite.fillRect(x, y, drawW, lineStep, bg);
             if (cell.ch != " ") {
                 uint32_t cp = utf8Codepoint(cell.ch);
-                if (drawBlockGlyph(cp, x, y, cellW, lineStep, fg, bg)) {
+                if (drawTerminusGlyph(cp, x, y, lineStep, fg)) {
+                    ++col;
                     continue;
                 }
-                if (drawBoxGlyph(cp, x, y, cellW, lineStep, fg)) {
-                    continue;
+                const lgfx::IFont* glyphFont = fontForTerminalCodepoint(cp);
+                if (!glyphFont) {
+                    if (drawBlockGlyph(cp, x, y, drawW, lineStep, fg, bg)) {
+                        ++col;
+                        continue;
+                    }
+                    if (drawBoxGlyph(cp, x, y, drawW, lineStep, fg)) {
+                        ++col;
+                        continue;
+                    }
+                    if (drawFallbackUnicodeGlyph(cp, x, y, drawW, lineStep, fg, bg)) {
+                        ++col;
+                        continue;
+                    }
+                    glyphFont = terminalFont().japaneseFont;
                 }
-                bool japanese = static_cast<uint8_t>(cell.ch[0]) >= 0x80;
-                screenSprite.setFont(japanese ? terminalFont().japaneseFont : terminalFont().font);
+                screenSprite.setFont(glyphFont);
                 screenSprite.setTextSize(1);
                 screenSprite.setTextColor(fg, bg);
                 int textY = y + max<int>(0, (lineStep - screenSprite.fontHeight()) / 2);
                 screenSprite.drawString(cell.ch, x, textY);
             }
+            ++col;
+        }
+    };
+
+    if (canShiftRows) {
+        const int exposed = abs(scrollDelta);
+        if (scrollDelta > 0) {
+            for (int row = 0; row < exposed; ++row) {
+                drawRow(static_cast<size_t>(row), true);
+            }
+        } else {
+            const int rows = static_cast<int>(vt.rows());
+            for (int row = max(0, rows - exposed); row < rows; ++row) {
+                drawRow(static_cast<size_t>(row), true);
+            }
+        }
+    } else {
+        const bool force = viewingHistory;
+        for (size_t row = 0; row < vt.rows(); ++row) {
+            drawRow(row, force);
         }
     }
     setTerminalFont();
     screenSprite.setTextColor(TFT_GREEN, TFT_BLACK);
     vt.clearDirty();
+    lastViewingHistory = viewingHistory;
+    lastScrollbackOffset = vt.scrollbackOffset();
 }
 
 void resetCommandEditor()
@@ -693,6 +1202,318 @@ void rememberCommandHistory(const String& line)
     commandHistoryIndex = commandHistory.size();
 }
 
+void appendCliLine(const String& line)
+{
+    terminal.append(line);
+    terminal.append("\n");
+}
+
+void appendCliHelp()
+{
+    appendCliLine("Tab5 CLI commands:");
+    appendCliLine("  help, man <command>, clear, status, history");
+    appendCliLine("  uname, whoami, hostname, date, uptime, echo");
+    appendCliLine("  wifi status, wifi list, ip addr");
+    appendCliLine("  ssh list, ssh connect <index>, ssh disconnect");
+    appendCliLine("  ssh user@host[:port] [password]");
+}
+
+void appendCliManEntry(const char* name, const char* synopsis, const char* description)
+{
+    appendCliLine(String("NAME"));
+    appendCliLine(String("  ") + name);
+    appendCliLine(String("SYNOPSIS"));
+    appendCliLine(String("  ") + synopsis);
+    appendCliLine(String("DESCRIPTION"));
+    appendCliLine(String("  ") + description);
+}
+
+bool appendCliMan(const String& topic)
+{
+    String key = topic;
+    key.trim();
+    key.toLowerCase();
+    while (key.indexOf("  ") >= 0) {
+        key.replace("  ", " ");
+    }
+    if (!key.length() || key == "help" || key == "man") {
+        appendCliManEntry("man", "man <command>", "Show help for Tab5 CLI built-in commands.");
+        appendCliLine("Try: man clear, man date, man wifi, man ssh");
+        return true;
+    }
+    if (key == "clear" || key == "cls" || key == "reset") {
+        appendCliManEntry("clear", "clear", "Clear the Tab5 CLI screen buffer.");
+        return true;
+    }
+    if (key == "status") {
+        appendCliManEntry("status", "status", "Show Wi-Fi, SSH, device, time, and active profile status.");
+        return true;
+    }
+    if (key == "history") {
+        appendCliManEntry("history", "history", "Show local Tab5 CLI command history.");
+        return true;
+    }
+    if (key == "whoami" || key == "hostname") {
+        appendCliManEntry(key.c_str(), key.c_str(), "Print the configured Tab5 device name.");
+        return true;
+    }
+    if (key == "uname") {
+        appendCliManEntry("uname", "uname [-a]", "Print Tab5 CLI firmware and platform information.");
+        return true;
+    }
+    if (key == "date") {
+        appendCliManEntry("date", "date", "Print NTP-synced local time using the configured region and UTC offset.");
+        return true;
+    }
+    if (key == "time" || key == "time sync" || key == "ntp" || key == "ntp sync") {
+        appendCliManEntry("time sync", "time sync | ntp sync", "Request network time synchronization over Wi-Fi.");
+        return true;
+    }
+    if (key == "uptime") {
+        appendCliManEntry("uptime", "uptime", "Print time elapsed since the firmware booted.");
+        return true;
+    }
+    if (key == "echo") {
+        appendCliManEntry("echo", "echo <text>", "Print text back to the Tab5 CLI screen.");
+        return true;
+    }
+    if (key == "wifi" || key == "wifi status") {
+        appendCliManEntry("wifi status", "wifi status", "Show Wi-Fi connection state, IP address, and SSID.");
+        appendCliLine("SEE ALSO");
+        appendCliLine("  wifi list");
+        return true;
+    }
+    if (key == "wifi list") {
+        appendCliManEntry("wifi list", "wifi list", "List saved Wi-Fi profiles and the active profile marker.");
+        return true;
+    }
+    if (key == "ip" || key == "ip addr" || key == "ip a" || key == "ifconfig") {
+        appendCliManEntry("ip addr", "ip addr | ip a | ifconfig", "Show the Tab5 wlan0 address and Wi-Fi state.");
+        return true;
+    }
+    if (key == "ssh" || key == "ssh list") {
+        appendCliManEntry("ssh list", "ssh list", "List saved SSH profiles and the active profile marker.");
+        appendCliLine("SEE ALSO");
+        appendCliLine("  ssh connect, ssh disconnect");
+        return true;
+    }
+    if (key == "ssh connect") {
+        appendCliManEntry("ssh connect", "ssh connect <index>", "Connect to a saved SSH profile by list index.");
+        return true;
+    }
+    if (key == "ssh disconnect") {
+        appendCliManEntry("ssh disconnect", "ssh disconnect", "Disconnect the active SSH session.");
+        return true;
+    }
+    if (key == "ssh direct" || key == "ssh user@host" || key == "ssh user@host[:port]") {
+        appendCliManEntry("ssh direct", "ssh user@host[:port] [password]", "Connect without a saved profile.");
+        return true;
+    }
+    if (key == "ls" || key == "dir" || key == "cd" || key == "pwd" || key == "cat") {
+        appendCliManEntry(key.c_str(), key.c_str(), "No shell filesystem is implemented in Tab5 CLI.");
+        appendCliLine("Use wifi list, wifi status, ssh list, or status.");
+        return true;
+    }
+    appendCliLine(String("No manual entry for ") + topic);
+    appendCliLine("type 'help' to list Tab5 CLI commands");
+    return true;
+}
+
+void appendWifiList()
+{
+    if (config.wifi.empty()) {
+        appendCliLine("no Wi-Fi profiles");
+        return;
+    }
+    for (size_t i = 0; i < config.wifi.size(); ++i) {
+        appendCliLine(String(i == activeWifi ? "* " : "  ") + i + " " + config.wifi[i].name + " " + config.wifi[i].ssid);
+    }
+}
+
+void appendSshList()
+{
+    if (config.ssh.empty()) {
+        appendCliLine("no SSH profiles");
+        return;
+    }
+    for (size_t i = 0; i < config.ssh.size(); ++i) {
+        const auto& p = config.ssh[i];
+        appendCliLine(String(i == activeSsh ? "* " : "  ") + i + " " + p.name + " " + p.user + "@" + p.host + ":" + p.port);
+    }
+}
+
+String formattedDateTime()
+{
+    time_t now = time(nullptr);
+    if (now < 1700000000) {
+        return "";
+    }
+    now += static_cast<time_t>(config.system.utcOffsetMinutes) * 60;
+    struct tm tmLocal;
+    gmtime_r(&now, &tmLocal);
+    const int offsetHours = config.system.utcOffsetMinutes / 60;
+    const int offsetMinutes = abs(config.system.utcOffsetMinutes % 60);
+    char buffer[64];
+    snprintf(buffer, sizeof(buffer), "%04d-%02d-%02d %02d:%02d:%02d UTC%+03d:%02d",
+             tmLocal.tm_year + 1900,
+             tmLocal.tm_mon + 1,
+             tmLocal.tm_mday,
+             tmLocal.tm_hour,
+             tmLocal.tm_min,
+             tmLocal.tm_sec,
+             offsetHours,
+             offsetMinutes);
+    return String(buffer);
+}
+
+void startTimeSync(bool force)
+{
+    if (WiFi.status() != WL_CONNECTED) {
+        return;
+    }
+    if (!force && timeSyncStarted && millis() - lastTimeSyncAttempt < 3600000UL) {
+        return;
+    }
+    timeSyncStarted = true;
+    timeSynced = false;
+    lastTimeSyncAttempt = millis();
+    configTime(0, 0, config.system.ntpServer.c_str(), "time.nict.jp", "pool.ntp.org");
+    setWifiStatus(String("Time sync: ") + config.system.ntpServer);
+}
+
+void pollTimeSync()
+{
+    if (!timeSyncStarted || timeSynced) {
+        return;
+    }
+    if (time(nullptr) >= 1700000000) {
+        timeSynced = true;
+        appendCliLine(String("[time] ") + formattedDateTime() + " " + config.system.region);
+    }
+}
+
+bool handleTab5CliCommand(const String& line)
+{
+    String command = line;
+    command.trim();
+    String lower = command;
+    lower.toLowerCase();
+
+    if (lower == "help" || lower == "?") {
+        appendCliHelp();
+        return true;
+    }
+    if (lower == "man") {
+        appendCliHelp();
+        appendCliLine("Usage: man <command>");
+        return true;
+    }
+    if (lower.startsWith("man ")) {
+        return appendCliMan(command.substring(4));
+    }
+    if (lower == "clear" || lower == "cls" || lower == "reset") {
+        terminal.clear();
+        return true;
+    }
+    if (lower == "status") {
+        appendCliLine(String("screen=Tab5 CLI wifi=") + wifiStatusText);
+        appendCliLine(String("ip=") + WiFi.localIP().toString() + " ssid=" + WiFi.SSID());
+        appendCliLine(String("ssh=") + (ssh.connected() ? "connected" : "disconnected"));
+        appendCliLine(String("device=") + config.system.deviceName + " region=" + config.system.region);
+        appendCliLine(String("time=") + (timeSynced ? formattedDateTime() : "not synced"));
+        appendCliLine(String("activeWifi=") + activeWifi + " activeSsh=" + activeSsh);
+        return true;
+    }
+    if (lower == "history") {
+        for (size_t i = 0; i < commandHistory.size(); ++i) {
+            appendCliLine(String(i + 1) + "  " + commandHistory[i]);
+        }
+        return true;
+    }
+    if (lower == "whoami") {
+        appendCliLine(config.system.deviceName);
+        return true;
+    }
+    if (lower == "hostname") {
+        appendCliLine(config.system.deviceName);
+        return true;
+    }
+    if (lower == "uname" || lower == "uname -a") {
+        appendCliLine("Tab5 CLI tab5 0.1.0 esp32p4 arduino");
+        return true;
+    }
+    if (lower == "date") {
+        String text = formattedDateTime();
+        if (text.length()) {
+            appendCliLine(text + " " + config.system.region);
+        } else {
+            appendCliLine("time not synced; connect Wi-Fi or run 'time sync'");
+            startTimeSync(true);
+        }
+        return true;
+    }
+    if (lower == "time sync" || lower == "ntp sync") {
+        startTimeSync(true);
+        appendCliLine("time sync requested");
+        return true;
+    }
+    if (lower == "uptime") {
+        uint32_t seconds = millis() / 1000;
+        appendCliLine(String("up ") + (seconds / 3600) + "h " + ((seconds / 60) % 60) + "m " + (seconds % 60) + "s");
+        return true;
+    }
+    if (lower == "pwd" || lower == "ls" || lower.startsWith("ls ") ||
+        lower == "dir" || lower.startsWith("dir ") || lower == "cd" || lower.startsWith("cd ") ||
+        lower.startsWith("cat ")) {
+        appendCliLine("Tab5 CLI has no shell filesystem.");
+        appendCliLine("Use 'wifi list', 'wifi status', 'ssh list', or 'status'.");
+        return true;
+    }
+    if (lower == "wifi status") {
+        appendCliLine(wifiStatusText);
+        appendCliLine(String("wl=") + static_cast<int>(WiFi.status()) + " ip=" + WiFi.localIP().toString() + " ssid=" + WiFi.SSID());
+        return true;
+    }
+    if (lower == "wifi list") {
+        appendWifiList();
+        return true;
+    }
+    if (lower == "ip addr" || lower == "ip a" || lower == "ifconfig") {
+        appendCliLine("wlan0:");
+        appendCliLine(String("  inet ") + WiFi.localIP().toString());
+        appendCliLine(String("  ssid ") + WiFi.SSID());
+        appendCliLine(String("  status ") + static_cast<int>(WiFi.status()));
+        return true;
+    }
+    if (lower == "ssh list") {
+        appendSshList();
+        return true;
+    }
+    if (lower == "ssh disconnect") {
+        ssh.disconnect();
+        resetCommandEditor();
+        configureTerminal();
+        appendCliLine("SSH disconnected");
+        return true;
+    }
+    if (lower.startsWith("ssh connect")) {
+        size_t index = 0;
+        if (parseTrailingIndex(command, strlen("ssh connect"), index) && index < config.ssh.size()) {
+            activeSsh = index;
+            saveConfig();
+            connectActiveSsh();
+        } else {
+            appendCliLine("usage: ssh connect <index>");
+        }
+        return true;
+    }
+    if (lower.startsWith("echo ")) {
+        appendCliLine(command.substring(5));
+        return true;
+    }
+    return false;
+}
+
 void executeLocalCommand()
 {
     String line = commandLine;
@@ -706,27 +1527,19 @@ void executeLocalCommand()
         return;
     }
 
+    if (handleTab5CliCommand(line)) {
+        dirty = true;
+        return;
+    }
+
     SshProfile directProfile;
     String error;
     if (parseSshCommand(line, directProfile, error)) {
         connectSshProfile(directProfile);
     } else {
-        terminal.append(error + "\n");
+        appendCliLine(String(line) + ": command not found");
+        appendCliLine("type 'help' for Tab5 CLI commands, or use ssh user@host[:port]");
     }
-    dirty = true;
-}
-
-void sendCommandLine()
-{
-    if (!ssh.connected()) {
-        executeLocalCommand();
-        return;
-    }
-    String line = commandLine;
-    String payload = line + "\n";
-    ssh.write(reinterpret_cast<const uint8_t*>(payload.c_str()), payload.length());
-    rememberCommandHistory(line);
-    resetCommandEditor();
     dirty = true;
 }
 
@@ -872,6 +1685,7 @@ void drawHeader()
     drawButton(BtnWifi, "WIFI");
     drawButton(BtnSsh, "SSH");
     drawButton(BtnFont, "FONT");
+    drawButton(BtnConfig, "CONF");
 
     if (screen == Screen::Terminal) {
         drawButton(BtnConnect, ssh.connected() ? "DISC" : "CONN", TFT_WHITE, ssh.connected() ? TFT_MAROON : TFT_DARKGREEN);
@@ -882,12 +1696,26 @@ void drawHeader()
     } else if (screen == Screen::SshEdit) {
         drawButton(BtnSave, "SAVE", TFT_WHITE, TFT_DARKGREEN);
         drawButton(BtnDelete, "DEL", TFT_WHITE, TFT_MAROON);
+    } else if (screen == Screen::ConfigEdit) {
+        drawButton(BtnSave, "SAVE", TFT_WHITE, TFT_DARKGREEN);
     }
 
     screenSprite.setTextColor(TFT_WHITE, TFT_DARKGREY);
-    String status = wifiStatusText.length() ? wifiStatusText : statusLine;
+    String wifiStateText = "WiFi down";
+    if (WiFi.status() == WL_CONNECTED) {
+        wifiStateText = "WiFi ok";
+    } else if (wifiState == WifiConnectState::Connecting) {
+        wifiStateText = "WiFi conn";
+    } else if (wifiState == WifiConnectState::Failed && wifiRetryAt) {
+        wifiStateText = "WiFi retry";
+    }
+    String status = wifiStateText + (ssh.connected() ? "  SSH ok" : "  SSH down");
     if (screen == Screen::FontList) {
         status = String("Font: ") + terminalFont().label + " line " + terminalLineStep();
+    } else if (screen == Screen::ConfigEdit) {
+        status = String(config.system.deviceName) + " " + config.system.region;
+    } else if (screen == Screen::Terminal && ssh.connected() && vt.scrollbackOffset() > 0) {
+        status = String("Scroll +") + vt.scrollbackOffset();
     }
     if (status.length() > 42) {
         status = status.substring(0, 42);
@@ -911,7 +1739,7 @@ void configureTerminal()
 
 void appendStatus(const String& message)
 {
-    terminal.append("\n[tab5] ");
+    terminal.append("[tab5] ");
     terminal.append(message);
     terminal.append("\n");
     Serial.print("[tab5] ");
@@ -936,6 +1764,11 @@ void setWifiStatus(const String& message)
 {
     wifiStatusText = message;
     headerDirty = true;
+}
+
+void appendWifiProgress(const String& message)
+{
+    appendStatus(message);
 }
 
 String wifiDisconnectSummary()
@@ -963,7 +1796,7 @@ void setWifiFailureStatus(const String& prefix)
 {
     wifiLastFailureText = prefix + " " + wifiDisconnectSummary();
     setWifiStatus(wifiLastFailureText);
-    terminal.append(String("\n[tab5] ") + wifiLastFailureText + "\n");
+    appendWifiProgress(wifiLastFailureText);
 }
 
 void handleWifiEvent(arduino_event_id_t event, arduino_event_info_t info)
@@ -1069,6 +1902,7 @@ void beginWifiAttempt(size_t index)
         wifiRetryAt = millis() + 10000;
         String reason = wifiLastFailureText.length() ? wifiLastFailureText : String("WiFi fail ") + wifiDisconnectSummary();
         setWifiStatus(reason + "; retry 10s");
+        appendWifiProgress(reason + "; retry 10s");
         return;
     }
 
@@ -1080,6 +1914,7 @@ void beginWifiAttempt(size_t index)
     wifiLastFailureText = "";
     String ssid = ForceFixedWifiForTest ? String(FixedWifiSsid) : config.wifi[wifiProfileIndex].ssid;
     String password = ForceFixedWifiForTest ? String(FixedWifiPassword) : config.wifi[wifiProfileIndex].password;
+    appendWifiProgress(String("Wi-Fi begin: ") + ssid);
     if (!startWifiBeginWorker(ssid, password)) {
         setWifiFailureStatus(String("WiFi start fail ") + ssid);
         beginWifiAttempt(wifiProfileIndex + 1);
@@ -1096,12 +1931,14 @@ void startWifiReconnect(uint32_t timeoutMs = 20000)
         wifiState = WifiConnectState::Failed;
         wifiRetryAt = 0;
         setWifiStatus("Wi-Fi fail: no profile");
+        appendWifiProgress("Wi-Fi fail: no profile");
         return;
     }
     if (!ForceFixedWifiForTest && activeWifi >= config.wifi.size()) {
         activeWifi = 0;
     }
     setWifiStatus(ForceFixedWifiForTest ? "Wi-Fi direct test" : "Wi-Fi reconnect");
+    appendWifiProgress(ForceFixedWifiForTest ? "Wi-Fi direct test" : "Wi-Fi reconnect");
     beginWifiAttempt(ForceFixedWifiForTest ? 0 : activeWifi);
 }
 
@@ -1119,18 +1956,22 @@ void pollWifi()
     if (wifiState == WifiConnectState::Connecting) {
         if (wifiWorkerDone) {
             wifiWorkerDone = false;
-            setWifiStatus(String("Wi-Fi try: ") + config.wifi[wifiProfileIndex].ssid);
+            String ssid = ForceFixedWifiForTest ? String(FixedWifiSsid) : config.wifi[wifiProfileIndex].ssid;
+            setWifiStatus(String("Wi-Fi try: ") + ssid);
+            appendWifiProgress(String("Wi-Fi try: ") + ssid);
         }
         if (WiFi.status() == WL_CONNECTED) {
             wifiState = WifiConnectState::Connected;
             setWifiStatus(String("Wi-Fi connected: ") + WiFi.SSID() + " " + WiFi.localIP().toString());
-            terminal.append(String("\n[tab5] ") + wifiStatusText + "\n");
+            appendWifiProgress(wifiStatusText);
+            startTimeSync(false);
             return;
         }
         if (millis() - wifiAttemptStart >= wifiAttemptTimeoutMs) {
             if (wifiWorkerBusy) {
                 String ssid = ForceFixedWifiForTest ? String(FixedWifiSsid) : config.wifi[wifiProfileIndex].ssid;
                 setWifiStatus(String("Wi-Fi start busy: ") + ssid);
+                appendWifiProgress(String("Wi-Fi start busy: ") + ssid);
                 wifiAttemptStart = millis();
                 return;
             }
@@ -1150,6 +1991,7 @@ void pollWifi()
         wifiState = WifiConnectState::Failed;
         wifiRetryAt = millis() + 3000;
         setWifiStatus("Wi-Fi lost; reconnect");
+        appendWifiProgress("Wi-Fi lost; reconnect");
         return;
     }
 
@@ -1165,6 +2007,7 @@ void pollWifi()
                 wifiLastRetrySecond = remaining;
                 String reason = wifiLastFailureText.length() ? wifiLastFailureText : String("WiFi fail ") + wifiDisconnectSummary();
                 setWifiStatus(reason + String("; retry ") + remaining + "s");
+                appendWifiProgress(reason + String("; retry ") + remaining + "s");
             }
         }
     }
@@ -1181,12 +2024,16 @@ void connectActiveSsh()
     }
     ssh.disconnect();
     String err;
+    screen = Screen::Terminal;
+    dirty = true;
     appendStatus(String("Connecting SSH: ") + config.ssh[activeSsh].host);
+    draw();
     setCrashStage("ssh.connect");
     if (ssh.connect(config.ssh[activeSsh], err, static_cast<int>(vt.columns()), static_cast<int>(vt.rows()))) {
         setCrashStage("ssh.connected");
         resetCommandEditor();
         vt.reset();
+        vt.scrollbackToBottom();
         configureTerminal();
         appendStatus("SSH connected");
         screen = Screen::Terminal;
@@ -1200,12 +2047,16 @@ bool connectSshProfile(const SshProfile& profile)
 {
     ssh.disconnect();
     String err;
+    screen = Screen::Terminal;
+    dirty = true;
     appendStatus(String("Connecting SSH: ") + profile.user + "@" + profile.host);
+    draw();
     setCrashStage("ssh.connect.direct");
     if (ssh.connect(profile, err, static_cast<int>(vt.columns()), static_cast<int>(vt.rows()))) {
         setCrashStage("ssh.connected");
         resetCommandEditor();
         vt.reset();
+        vt.scrollbackToBottom();
         configureTerminal();
         appendStatus("SSH connected");
         screen = Screen::Terminal;
@@ -1367,6 +2218,77 @@ void setSshFieldValue(uint8_t field, const String& value)
     if (field == 5) p.terminal = value.length() ? value : "xterm-256color";
 }
 
+String configFieldValue(uint8_t field)
+{
+    if (field == 0) return config.system.deviceName;
+    if (field == 1) return config.system.region;
+    if (field == 2) return String(config.system.utcOffsetMinutes);
+    return config.system.ntpServer;
+}
+
+void setConfigFieldValue(uint8_t field, const String& value)
+{
+    if (field == 0) config.system.deviceName = value.length() ? value : "tab5";
+    if (field == 1) config.system.region = value.length() ? value : "Asia/Tokyo";
+    if (field == 2) config.system.utcOffsetMinutes = static_cast<int16_t>(constrain(value.toInt(), -720, 840));
+    if (field == 3) config.system.ntpServer = value.length() ? value : "pool.ntp.org";
+}
+
+uint8_t editFieldCount()
+{
+    if (screen == Screen::WifiEdit) return 3;
+    if (screen == Screen::SshEdit) return 6;
+    if (screen == Screen::ConfigEdit) return 4;
+    return 0;
+}
+
+String currentEditFieldValue()
+{
+    if (screen == Screen::WifiEdit) return wifiFieldValue(editField);
+    if (screen == Screen::SshEdit) return sshFieldValue(editField);
+    if (screen == Screen::ConfigEdit) return configFieldValue(editField);
+    return "";
+}
+
+void setCurrentEditFieldValue(const String& value)
+{
+    if (screen == Screen::WifiEdit) setWifiFieldValue(editField, value);
+    if (screen == Screen::SshEdit) setSshFieldValue(editField, value);
+    if (screen == Screen::ConfigEdit) setConfigFieldValue(editField, value);
+}
+
+void clampEditCursor()
+{
+    String value = currentEditFieldValue();
+    if (editCursor > value.length()) {
+        editCursor = value.length();
+    }
+}
+
+void setEditCursorToEnd()
+{
+    editCursor = currentEditFieldValue().length();
+}
+
+void moveEditCursor(int delta)
+{
+    clampEditCursor();
+    String value = currentEditFieldValue();
+    if (delta < 0) {
+        if (!editCursor) return;
+        --editCursor;
+        while (editCursor > 0 && (static_cast<uint8_t>(value[editCursor]) & 0xC0) == 0x80) {
+            --editCursor;
+        }
+    } else if (delta > 0 && editCursor < value.length()) {
+        editCursor += utf8CharLength(static_cast<uint8_t>(value[editCursor]));
+        if (editCursor > value.length()) editCursor = value.length();
+    }
+    cursorVisible = true;
+    lastCursorBlink = millis();
+    dirty = true;
+}
+
 void drawTerminal()
 {
     if (ssh.connected()) {
@@ -1393,7 +2315,7 @@ void drawTerminal()
 
             size_t visibleStart = 0;
             while (visibleStart < prefix.length() &&
-                   screenSprite.textWidth(prefix.substring(visibleStart)) > screenSprite.width() - 16) {
+                   terminalTextWidth(prefix.substring(visibleStart)) > screenSprite.width() - 16) {
                 ++visibleStart;
                 while (visibleStart < prefix.length() &&
                        (static_cast<uint8_t>(prefix[visibleStart]) & 0xC0) == 0x80) {
@@ -1401,24 +2323,19 @@ void drawTerminal()
                 }
             }
 
-            int textY = lineTop + max<int>(0, (lineStep - screenSprite.fontHeight()) / 2);
             String visiblePrefix = prefix.substring(visibleStart);
             int x = 4;
-            screenSprite.drawString(visiblePrefix, x, textY);
-            x += screenSprite.textWidth(visiblePrefix);
+            x += drawTerminalText(visiblePrefix, x, lineTop, lineStep, TFT_GREEN, TFT_BLACK);
             if (cursorVisible) {
-                int cursorW = max<int>(terminalCellWidth(), screenSprite.textWidth(cursorGlyph));
+                int cursorW = max<int>(terminalCellWidth(), terminalTextWidth(cursorGlyph));
                 screenSprite.fillRect(x, lineTop, cursorW, lineStep, TFT_GREEN);
-                screenSprite.setTextColor(TFT_BLACK, TFT_GREEN);
-                screenSprite.drawString(cursorGlyph, x, textY);
-                screenSprite.setTextColor(TFT_GREEN, TFT_BLACK);
+                drawTerminalText(cursorGlyph, x, lineTop, lineStep, TFT_BLACK, TFT_GREEN);
                 x += cursorW;
             } else {
-                screenSprite.drawString(cursorGlyph, x, textY);
-                x += screenSprite.textWidth(cursorGlyph);
+                x += drawTerminalText(cursorGlyph, x, lineTop, lineStep, TFT_GREEN, TFT_BLACK);
             }
             if (suffix.length()) {
-                screenSprite.drawString(suffix, x, textY);
+                drawTerminalText(suffix, x, lineTop, lineStep, TFT_GREEN, TFT_BLACK);
             }
             continue;
         }
@@ -1530,14 +2447,45 @@ void drawEditFields(const char* title, const char* const* labels, uint8_t count,
         screenSprite.setTextColor(TFT_WHITE, bg);
         setSettingsFontForLine(labels[i]);
         screenSprite.drawString(labels[i], 12, settingTextY(y));
-        String value = sshFields ? sshFieldValue(i) : wifiFieldValue(i);
-        bool secret = sshFields && i == 4;
-        value = safeValue(value, secret);
-        if (value.length() > 28) {
-            value = value.substring(0, 28);
+        String rawValue;
+        if (screen == Screen::WifiEdit) rawValue = wifiFieldValue(i);
+        else if (screen == Screen::SshEdit) rawValue = sshFieldValue(i);
+        else rawValue = configFieldValue(i);
+        bool secret = (screen == Screen::SshEdit && i == 4) || (screen == Screen::WifiEdit && i == 2);
+        String value = safeValue(rawValue, secret);
+        size_t cursor = i == editField ? min(editCursor, rawValue.length()) : rawValue.length();
+        if (secret) cursor = min(cursor, value.length());
+        String prefix = value.substring(0, cursor);
+        String cursorGlyph = " ";
+        String suffix = "";
+        if (cursor < value.length()) {
+            size_t next = cursor + utf8CharLength(static_cast<uint8_t>(value[cursor]));
+            cursorGlyph = value.substring(cursor, next);
+            suffix = value.substring(next);
+        }
+        while (prefix.length() && screenSprite.textWidth(prefix + cursorGlyph + suffix) > screenSprite.width() - 195) {
+            uint8_t len = utf8CharLength(static_cast<uint8_t>(prefix[0]));
+            prefix = prefix.substring(len);
         }
         setSettingsFontForLine(value);
-        screenSprite.drawString(value, 180, settingTextY(y));
+        int x = 180;
+        int textY = settingTextY(y);
+        screenSprite.drawString(prefix, x, textY);
+        x += screenSprite.textWidth(prefix);
+        if (i == editField && cursorVisible) {
+            int cursorW = max<int>(terminalCellWidth(), screenSprite.textWidth(cursorGlyph));
+            screenSprite.fillRect(x, y + 3, cursorW, settingRowH() - 10, TFT_GREEN);
+            screenSprite.setTextColor(TFT_BLACK, TFT_GREEN);
+            screenSprite.drawString(cursorGlyph, x, textY);
+            screenSprite.setTextColor(TFT_WHITE, bg);
+            x += cursorW;
+        } else {
+            screenSprite.drawString(cursorGlyph, x, textY);
+            x += screenSprite.textWidth(cursorGlyph);
+        }
+        if (suffix.length()) {
+            screenSprite.drawString(suffix, x, textY);
+        }
     }
 }
 
@@ -1561,8 +2509,8 @@ void drawFontList()
         screenSprite.fillRect(4, y, screenSprite.width() - 8, settingRowH() - 4, bg);
         screenSprite.drawRect(4, y, screenSprite.width() - 8, settingRowH() - 4, focused ? TFT_CYAN : TFT_DARKGREY);
         screenSprite.setTextColor(TFT_WHITE, bg);
-        String line = String(selected ? "* " : "  ") + TerminalFonts[i].label + " / Japanese auto" +
-                      "  default line " + TerminalFonts[i].defaultLineStep + " px";
+        String line = String(selected ? "* " : "  ") + TerminalFonts[i].label + "  default line " +
+                      TerminalFonts[i].defaultLineStep + " px";
         setSettingsFontForLine(line);
         screenSprite.drawString(line, 12, settingTextY(y));
     }
@@ -1591,6 +2539,9 @@ void draw()
     } else if (screen == Screen::SshEdit) {
         static const char* const labels[] = {"Name", "Host", "Port", "User", "Password", "Term"};
         drawEditFields("Edit SSH", labels, 6, true);
+    } else if (screen == Screen::ConfigEdit) {
+        static const char* const labels[] = {"Device", "Region", "UTC min", "NTP"};
+        drawEditFields("Config", labels, 4, false);
     } else if (screen == Screen::FontList) {
         drawFontList();
     }
@@ -1616,6 +2567,7 @@ void beginWifiEdit(size_t index, bool isNew)
     editField = 0;
     editIsNew = isNew;
     screen = Screen::WifiEdit;
+    setEditCursorToEnd();
     dirty = true;
 }
 
@@ -1625,6 +2577,7 @@ void beginSshEdit(size_t index, bool isNew)
     editField = 0;
     editIsNew = isNew;
     screen = Screen::SshEdit;
+    setEditCursorToEnd();
     dirty = true;
 }
 
@@ -1797,6 +2750,9 @@ void saveEditingProfile()
             screen = Screen::WifiList;
         } else if (screen == Screen::SshEdit) {
             screen = Screen::SshList;
+        } else if (screen == Screen::ConfigEdit) {
+            startTimeSync(true);
+            screen = Screen::Terminal;
         }
     }
     dirty = true;
@@ -1823,6 +2779,11 @@ bool handleHeaderTouch(int x, int y)
         settingScrollOffset = 0;
         focusedContentItem = 0;
         dirty = true;
+    } else if (headerButtonContains(BtnConfig, x, y)) {
+        screen = Screen::ConfigEdit;
+        editField = 0;
+        setEditCursorToEnd();
+        dirty = true;
     } else if (screen == Screen::Terminal && headerButtonContains(BtnConnect, x, y)) {
         if (ssh.connected()) {
             ssh.disconnect();
@@ -1837,7 +2798,8 @@ bool handleHeaderTouch(int x, int y)
             startWifiReconnect(20000);
         }
         dirty = true;
-    } else if ((screen == Screen::WifiEdit || screen == Screen::SshEdit) && headerButtonContains(BtnSave, x, y)) {
+    } else if ((screen == Screen::WifiEdit || screen == Screen::SshEdit || screen == Screen::ConfigEdit) &&
+               headerButtonContains(BtnSave, x, y)) {
         saveEditingProfile();
     } else if ((screen == Screen::WifiEdit || screen == Screen::SshEdit) && headerButtonContains(BtnDelete, x, y)) {
         deleteEditingProfile();
@@ -2058,20 +3020,6 @@ void editFocusedSshProfile()
     }
 }
 
-void editFocusedWifiProfile()
-{
-    if (focusedContentItem >= 3) {
-        size_t index = focusedContentItem - 3;
-        if (index < config.wifi.size()) {
-            beginWifiEdit(index, false);
-            return;
-        }
-    }
-    if (activeWifi < config.wifi.size()) {
-        beginWifiEdit(activeWifi, false);
-    }
-}
-
 void selectFocusedWifiProfile()
 {
     if (focusedContentItem < 3) {
@@ -2106,9 +3054,10 @@ void handleEditTouch(int, int y)
         return;
     }
     uint8_t field = static_cast<uint8_t>((y - settingListTop()) / settingRowH());
-    uint8_t maxField = screen == Screen::WifiEdit ? 3 : 6;
+    uint8_t maxField = editFieldCount();
     if (field < maxField) {
         editField = field;
+        setEditCursorToEnd();
         dirty = true;
     }
 }
@@ -2116,6 +3065,64 @@ void handleEditTouch(int, int y)
 void handleTouch()
 {
     auto touch = M5.Touch.getDetail();
+    if (screen == Screen::Terminal) {
+        if (touch.wasPressed()) {
+            touchScrollRemainderY = 0;
+            touchScrollActive = false;
+        }
+        if (touch.isFlicking() || touch.isDragging()) {
+            touchScrollRemainderY += touch.deltaY();
+            const int step = max<int>(1, terminalLineStep());
+            int lines = touchScrollRemainderY / step;
+            if (lines) {
+                if (ssh.connected()) {
+                    vt.scrollback(lines);
+                } else {
+                    terminal.scroll(lines);
+                }
+                touchScrollRemainderY -= lines * step;
+                touchScrollActive = true;
+                dirty = true;
+                return;
+            }
+            if (touchScrollActive) {
+                return;
+            }
+        }
+        if (touch.wasReleased()) {
+            bool consumed = touchScrollActive;
+            touchScrollRemainderY = 0;
+            touchScrollActive = false;
+            if (consumed) {
+                return;
+            }
+        }
+        if (touch.wasFlicked() || touch.wasDragged()) {
+            touchScrollRemainderY = 0;
+            if (touchScrollActive) {
+                touchScrollActive = false;
+                return;
+            }
+        }
+    } else {
+        touchScrollRemainderY = 0;
+        touchScrollActive = false;
+    }
+
+    if (screen == Screen::Terminal && touch.wasFlicked() && !touchScrollActive) {
+        const int dy = touch.distanceY();
+        if (abs(dy) > 30) {
+            int lines = max<int>(3, abs(dy) / max<int>(1, terminalLineStep()));
+            if (ssh.connected()) {
+                vt.scrollback(dy > 0 ? lines : -lines);
+            } else {
+                terminal.scroll(dy > 0 ? lines : -lines);
+            }
+            dirty = true;
+            return;
+        }
+    }
+
     if (!touch.wasClicked()) {
         return;
     }
@@ -2128,54 +3135,60 @@ void handleTouch()
     } else if (screen == Screen::WifiList || screen == Screen::WifiScan || screen == Screen::SshList ||
                screen == Screen::FontList) {
         handleListTouch(x, y);
-    } else if (screen == Screen::WifiEdit || screen == Screen::SshEdit) {
+    } else if (screen == Screen::WifiEdit || screen == Screen::SshEdit || screen == Screen::ConfigEdit) {
         handleEditTouch(x, y);
     }
 }
 
 void editAppendChar(char c)
 {
-    if (screen != Screen::WifiEdit && screen != Screen::SshEdit) {
+    if (screen != Screen::WifiEdit && screen != Screen::SshEdit && screen != Screen::ConfigEdit) {
         return;
     }
 
-    const bool isSsh = screen == Screen::SshEdit;
-    const uint8_t maxField = isSsh ? 6 : 3;
+    const uint8_t maxField = editFieldCount();
     if (c == '\r' || c == '\n') {
         saveEditingProfile();
         return;
     }
     if (c == '\t') {
         editField = (editField + 1) % maxField;
+        setEditCursorToEnd();
         dirty = true;
         return;
     }
 
-    String value = isSsh ? sshFieldValue(editField) : wifiFieldValue(editField);
+    String value = currentEditFieldValue();
+    clampEditCursor();
     if (c == 0x08 || c == 0x7F) {
-        if (value.length()) {
-            value.remove(value.length() - 1);
+        if (editCursor > 0) {
+            size_t pos = editCursor - 1;
+            while (pos > 0 && (static_cast<uint8_t>(value[pos]) & 0xC0) == 0x80) {
+                --pos;
+            }
+            value = value.substring(0, pos) + value.substring(editCursor);
+            editCursor = pos;
         }
     } else if (std::isprint(static_cast<unsigned char>(c))) {
-        if (!(isSsh && editField == 2 && !std::isdigit(static_cast<unsigned char>(c)))) {
-            value += c;
+        bool numeric = (screen == Screen::SshEdit && editField == 2) || (screen == Screen::ConfigEdit && editField == 2);
+        bool allowed = !numeric || std::isdigit(static_cast<unsigned char>(c)) ||
+                       (screen == Screen::ConfigEdit && editField == 2 && c == '-' && editCursor == 0);
+        if (allowed) {
+            value = value.substring(0, editCursor) + String(c) + value.substring(editCursor);
+            ++editCursor;
         }
     }
 
-    if (isSsh) {
-        setSshFieldValue(editField, value);
-    } else {
-        setWifiFieldValue(editField, value);
-    }
+    setCurrentEditFieldValue(value);
     dirty = true;
 }
 
 void moveEditField(int delta)
 {
-    if (screen != Screen::WifiEdit && screen != Screen::SshEdit) {
+    if (screen != Screen::WifiEdit && screen != Screen::SshEdit && screen != Screen::ConfigEdit) {
         return;
     }
-    const uint8_t maxField = screen == Screen::WifiEdit ? 3 : 6;
+    const uint8_t maxField = editFieldCount();
     int next = static_cast<int>(editField) + delta;
     if (next < 0) {
         next = maxField - 1;
@@ -2183,6 +3196,7 @@ void moveEditField(int delta)
         next = 0;
     }
     editField = static_cast<uint8_t>(next);
+    setEditCursorToEnd();
     dirty = true;
 }
 
@@ -2386,15 +3400,23 @@ void handleTerminalAction(const KeyAction& action)
                     dirty = true;
                     break;
                 }
+                vt.scrollbackToBottom();
                 sendSshText(action.text);
                 trackRemoteCommandText(action.text);
+                cursorVisible = true;
+                lastCursorBlink = millis();
+                vt.markCursorDirty();
             } else {
                 handleDisconnectedTerminalText(action);
             }
             dirty = true;
             break;
         case KeyActionType::Scroll:
-            terminal.scroll(action.value);
+            if (ssh.connected()) {
+                vt.scrollback(action.value);
+            } else {
+                terminal.scroll(action.value);
+            }
             dirty = true;
             break;
         case KeyActionType::ConnectNext:
@@ -2459,17 +3481,23 @@ void handleAction(const KeyAction& action)
         return;
     }
 
-    if (screen == Screen::WifiEdit || screen == Screen::SshEdit) {
-        if (isTabKey(action) || isRightKey(action) || isDownKey(action)) {
+    if (screen == Screen::WifiEdit || screen == Screen::SshEdit || screen == Screen::ConfigEdit) {
+        if (isTabKey(action) || isDownKey(action)) {
             moveEditField(1);
-        } else if (isLeftKey(action) || isUpKey(action)) {
+        } else if (isUpKey(action)) {
             moveEditField(-1);
+        } else if (isLeftKey(action)) {
+            moveEditCursor(-1);
+        } else if (isRightKey(action)) {
+            moveEditCursor(1);
         } else if (action.type == KeyActionType::Text) {
             for (size_t i = 0; i < action.text.length(); ++i) {
                 editAppendChar(action.text[i]);
             }
         } else if (action.type == KeyActionType::Menu) {
-            screen = screen == Screen::WifiEdit ? Screen::WifiList : Screen::SshList;
+            if (screen == Screen::WifiEdit) screen = Screen::WifiList;
+            else if (screen == Screen::SshEdit) screen = Screen::SshList;
+            else screen = Screen::Terminal;
             dirty = true;
         }
         return;
@@ -2514,18 +3542,31 @@ void pollSsh()
         return;
     }
     char buffer[512];
-    setCrashStage("ssh.read");
-    int n = ssh.read(buffer, sizeof(buffer));
-    if (n > 0) {
-        setCrashStage("ssh.append");
-        vt.write(buffer, static_cast<size_t>(n));
+    bool received = false;
+    uint32_t start = millis();
+    for (uint8_t reads = 0; reads < 8 && millis() - start < 8; ++reads) {
+        setCrashStage("ssh.read");
+        int n = ssh.read(buffer, sizeof(buffer));
+        if (n > 0) {
+            setCrashStage("ssh.append");
+            vt.write(buffer, static_cast<size_t>(n));
+            received = true;
+            lastSshReceive = millis();
+            continue;
+        }
+        if (n < 0) {
+            setCrashStage("ssh.read.error");
+            ssh.disconnect();
+            resetCommandEditor();
+            configureTerminal();
+            appendStatus("SSH disconnected by remote");
+            setCrashStage("loop");
+            return;
+        }
+        break;
+    }
+    if (received) {
         dirty = true;
-    } else if (n < 0) {
-        setCrashStage("ssh.read.error");
-        ssh.disconnect();
-        resetCommandEditor();
-        configureTerminal();
-        appendStatus("SSH disconnected by remote");
     }
     setCrashStage("loop");
 }
@@ -2767,6 +3808,17 @@ void tab5SetCrashStage(const char* stage)
     setCrashStage(stage);
 }
 
+void tab5SshProgress(const char* stage)
+{
+    static uint32_t lastProgressDraw = 0;
+    appendStatus(String("SSH: ") + stage);
+    uint32_t now = millis();
+    if (now - lastProgressDraw >= 300 || strcmp(stage, "ssh_connect") == 0 || strcmp(stage, "ssh_ready") == 0) {
+        lastProgressDraw = now;
+        draw();
+    }
+}
+
 void setup()
 {
     setCrashStage("setup.start");
@@ -2780,7 +3832,7 @@ void setup()
 
     Serial.begin(115200);
     WiFi.onEvent(handleWifiEvent, ARDUINO_EVENT_WIFI_STA_DISCONNECTED);
-    terminal.append("Tab5 SSH Client\n");
+    terminal.append("Tab5 CLI\n");
     esp_reset_reason_t resetReason = esp_reset_reason();
     appendStatus(String("Reset reason: ") + static_cast<int>(resetReason));
     if (crashStageMagic == 0x54414235 && strlen(crashStage)) {
@@ -2819,9 +3871,12 @@ void loop()
     }
     pollWifi();
     pollWifiScan();
+    pollTimeSync();
     pollSsh();
 
-    if (screen == Screen::Terminal && millis() - lastCursorBlink >= 500) {
+    if ((screen == Screen::Terminal || screen == Screen::WifiEdit || screen == Screen::SshEdit ||
+         screen == Screen::ConfigEdit) &&
+        millis() - lastCursorBlink >= 500) {
         lastCursorBlink = millis();
         if (ssh.connected()) {
             vt.markCursorDirty();
@@ -2833,10 +3888,15 @@ void loop()
         dirty = true;
     }
 
-    if (dirty && millis() - lastDraw > 5) {
+    uint32_t drawInterval = 5;
+    if (ssh.connected() && millis() - lastSshReceive < 25 && millis() - lastDraw < 250) {
+        drawInterval = 25;
+    }
+
+    if (dirty && millis() - lastDraw > drawInterval) {
         lastDraw = millis();
         draw();
-    } else if (headerDirty && millis() - lastDraw > 5) {
+    } else if (headerDirty && millis() - lastDraw > drawInterval) {
         lastDraw = millis();
         drawHeaderOnly();
     }

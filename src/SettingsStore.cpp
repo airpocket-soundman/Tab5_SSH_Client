@@ -59,6 +59,10 @@ bool SettingsStore::load(AppConfig& config)
     config.keyboard.terminalFont = doc["keyboard"]["terminalFont"] | "mono12";
     config.keyboard.terminalLineStep = doc["keyboard"]["terminalLineStep"] | 15;
     config.keyboard.swapCtrlCaps = doc["keyboard"]["swapCtrlCaps"] | false;
+    config.system.deviceName = doc["system"]["deviceName"] | "tab5";
+    config.system.region = doc["system"]["region"] | "Asia/Tokyo";
+    config.system.utcOffsetMinutes = doc["system"]["utcOffsetMinutes"] | 540;
+    config.system.ntpServer = doc["system"]["ntpServer"] | "pool.ntp.org";
     config.activeWifi = doc["activeWifi"] | 0;
     config.activeSsh = doc["activeSsh"] | 0;
     if (config.activeWifi >= config.wifi.size()) {
@@ -96,6 +100,10 @@ bool SettingsStore::save(const AppConfig& config)
     doc["keyboard"]["terminalFont"] = config.keyboard.terminalFont;
     doc["keyboard"]["terminalLineStep"] = config.keyboard.terminalLineStep;
     doc["keyboard"]["swapCtrlCaps"] = config.keyboard.swapCtrlCaps;
+    doc["system"]["deviceName"] = config.system.deviceName;
+    doc["system"]["region"] = config.system.region;
+    doc["system"]["utcOffsetMinutes"] = config.system.utcOffsetMinutes;
+    doc["system"]["ntpServer"] = config.system.ntpServer;
     doc["activeWifi"] = config.activeWifi;
     doc["activeSsh"] = config.activeSsh;
 
