@@ -3,3 +3,17 @@
 .vscode/c_cpp_properties.json
 .vscode/launch.json
 .vscode/ipch/
+.pioenvs/
+.piolibdeps/
+*.elf
+*.bin
+*.map
+*.log
+*.etl
+*.pcap
+*.pcapng
+.env
+.env.*
+secrets/
+local/
+data/profiles.local.json

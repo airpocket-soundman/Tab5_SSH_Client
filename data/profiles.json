@@ -1,26 +1,26 @@
 {
   "wifi": [
     {
-      "name": "home",
+      "name": "example-wifi",
       "ssid": "YOUR_WIFI_SSID",
       "password": "YOUR_WIFI_PASSWORD"
     }
   ],
   "ssh": [
     {
-      "name": "local-server",
-      "host": "192.168.1.10",
+      "name": "example-local",
+      "host": "192.0.2.10",
       "port": 22,
-      "user": "pi",
-      "password": "raspberry",
+      "user": "demo",
+      "password": "YOUR_SSH_PASSWORD",
       "terminal": "xterm-256color"
     },
     {
-      "name": "tailscale-server",
-      "host": "server.tailnet-name.ts.net",
+      "name": "example-relay",
+      "host": "192.0.2.20",
       "port": 22,
-      "user": "user",
-      "password": "",
+      "user": "demo",
+      "password": "YOUR_SSH_PASSWORD",
       "terminal": "xterm-256color"
     }
   ],

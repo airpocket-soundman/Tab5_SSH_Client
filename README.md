@@ -1,10 +1,37 @@
 # Tab5 SSH Client
 
-M5Stack Tab5 + Tab5 Keyboard SSH client project for VSCode + PlatformIO.
+English | [日本語](README.ja.md)
+
+M5Stack Tab5 SSH terminal firmware built with PlatformIO. The project targets a
+Tab5 with the Tab5 Keyboard and provides Wi-Fi profile loading, saved SSH
+profiles, keyboard input, and a scrollable terminal view.
+
+## Features
+
+- PlatformIO project for M5Stack Tab5 / ESP32-P4.
+- Wi-Fi and SSH profile loading from LittleFS JSON.
+- Multiple saved SSH profiles with host, port, user, password, and terminal type.
+- Direct CLI connection syntax: `ssh user@host[:port] [password]`.
+- Interactive SSH shell using `LibSSH-ESP32`.
+- Scrollable terminal buffer with basic ANSI escape handling.
+- Tab5 Keyboard input through `M5Unit-KEYBOARD`.
+- US/JP keyboard layout mapping on the Tab5 side.
+- USB keyboard input path for bring-up and testing.
+- Serial monitor command API for diagnostics.
+
+## Hardware
+
+- M5Stack Tab5
+- Tab5 Keyboard
+- USB cable for flashing and serial diagnostics
+- Wi-Fi network reachable by the Tab5
+
+See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the application flow and
+hardware notes.
 
 ## Build
 
-Install PlatformIO in VSCode, open this folder, then build the `tab5` environment.
+Install PlatformIO, open this folder, then build the `tab5` environment.
 
 ```powershell
 pio run
@@ -23,33 +50,133 @@ Upload firmware:
 pio run -t upload
 ```
 
-Upload profiles to LittleFS:
+Upload the LittleFS profile data:
 
 ```powershell
 pio run -t uploadfs
 ```
 
-## Configure profiles
+## Configuration
 
-Edit `data/profiles.json` before `uploadfs`.
+Edit `data/profiles.json` before running `uploadfs`.
 
-- `wifi`: multiple Wi-Fi profiles are tried in order.
-- `ssh`: multiple SSH targets can be stored.
-- Tailscale servers can be listed by Tailscale IP or MagicDNS name when the local network has a Tailscale subnet router or gateway.
+- `wifi`: Wi-Fi profiles are tried in order.
+- `ssh`: saved SSH targets shown in the Tab5 SSH profile list.
+- `keyboard.layout`: `us` or `jp`.
+- `system.region` and `system.utcOffsetMinutes`: used for local time display.
 
-## Current status
+Example SSH profile:
 
-Implemented:
+```json
+{
+  "name": "linux-box",
+  "host": "192.0.2.10",
+  "port": 22,
+  "user": "demo",
+  "password": "change-me",
+  "terminal": "xterm-256color"
+}
+```
 
-- PlatformIO project for Tab5/ESP32-P4 using `pioarduino/platform-espressif32`.
-- Wi-Fi and SSH profile loading from LittleFS JSON.
-- Scrollable terminal text buffer.
-- Tab5 Keyboard input path using M5Unit-KEYBOARD Character/HID events.
-- Tab5-side keyboard layout translation hook.
-- Interactive SSH shell wrapper using `LibSSH-ESP32`.
+Do not commit real Wi-Fi passwords or SSH credentials.
 
-Known hardware verification needed:
+## Usage
 
-- Confirm Arduino Wi-Fi initialization on the installed Tab5 firmware/core.
-- Confirm `LibSSH-ESP32` builds and runs on ESP32-P4 with the selected pioarduino release.
-- Tune terminal rendering for font size and ANSI escape handling.
+1. Edit `data/profiles.json` with at least one Wi-Fi profile and one SSH profile.
+2. Upload the firmware with `pio run -t upload`.
+3. Upload the profile file with `pio run -t uploadfs`.
+4. Reboot the Tab5.
+5. Wait until the status line shows a connected Wi-Fi network and an IP address.
+6. Open the `SSH` screen, select a profile, and press `CONNECT`.
+
+You can also connect from the terminal CLI:
+
+```text
+ssh list
+ssh connect 0
+```
+
+For a one-off connection without saving a profile:
+
+```text
+ssh demo@192.0.2.10:22
+```
+
+If a password is not provided in the direct command, the firmware tries to reuse
+credentials from a saved profile with the same host/user or host/user/port.
+
+## On-Device Controls
+
+The buttons in the top menu bar switch between the main screens:
+
+- `TERM`: terminal and built-in CLI.
+- `WIFI`: saved Wi-Fi profiles, scan, add, edit, and connect.
+- `SSH`: saved SSH profiles, add, edit, and connect.
+- `FONT`: terminal font and line spacing.
+- `CONF`: device, region, time offset, NTP, and keymap settings.
+- `CONN` / `DISC`: connect or disconnect from the current terminal screen.
+
+Keyboard shortcuts:
+
+- `Esc`: switch focus between the terminal/content area and the top menu bar.
+- `Tab`: move focus within the top menu bar, list screens, and edit/settings fields.
+- `Ctrl+Up`: scroll the terminal buffer upward.
+- `Ctrl+Down`: scroll the terminal buffer downward.
+
+When an SSH session is active on the terminal screen, `Esc` is sent to the
+remote shell/application and does not activate the top menu bar.
+
+Useful built-in CLI commands:
+
+```text
+help
+status
+wifi status
+wifi list
+ip addr
+ssh list
+ssh connect <index>
+ssh disconnect
+time sync
+clear
+```
+
+## Connecting to Tailscale hosts
+
+This firmware does not run a Tailscale node on the ESP32-P4. To connect to a
+tailnet host, put the Tab5 on a network that has a Tailscale gateway, subnet
+router, or another SSH relay. Then configure the SSH profile with the reachable
+gateway address and port.
+
+## Serial Diagnostics
+
+The firmware exposes a small serial API at `115200` baud:
+
+```text
+help
+status
+wifi status
+ssh list
+ssh connect [index]
+ssh disconnect
+term dump
+```
+
+`tools/serial_bridge.ps1` can log serial output and send commands from a text
+file during bring-up.
+
+## Repository Layout
+
+```text
+data/       LittleFS profile data
+docs/       Architecture notes
+include/    Headers
+src/        Firmware source
+tools/      Helper scripts
+```
+
+## Status
+
+This is an experimental firmware project for Tab5 hardware bring-up and mobile
+SSH use. Expect to tune Wi-Fi behavior, font sizing, terminal escape handling,
+and keyboard mapping for your own setup.
