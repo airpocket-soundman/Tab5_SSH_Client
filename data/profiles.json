@@ -8,16 +8,8 @@
   ],
   "ssh": [
     {
-      "name": "example-local",
+      "name": "example-linux",
       "host": "192.0.2.10",
-      "port": 22,
-      "user": "demo",
-      "password": "YOUR_SSH_PASSWORD",
-      "terminal": "xterm-256color"
-    },
-    {
-      "name": "example-relay",
-      "host": "192.0.2.20",
       "port": 22,
       "user": "demo",
       "password": "YOUR_SSH_PASSWORD",

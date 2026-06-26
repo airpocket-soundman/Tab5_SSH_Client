@@ -135,8 +135,8 @@ RTC_DATA_ATTR uint32_t crashStageMagic = 0;
 RTC_DATA_ATTR char crashStage[64] = "";
 
 constexpr bool ForceFixedWifiForTest = false;
-constexpr const char* FixedWifiSsid = "kumakero2.4";
-constexpr const char* FixedWifiPassword = "4roses6126";
+constexpr const char* FixedWifiSsid = "";
+constexpr const char* FixedWifiPassword = "";
 constexpr const char* LocalPrompt = "[tab5] ";
 constexpr const char* PythonPrompt = ">>> ";
 constexpr int SD_SPI_CS_PIN = 42;
@@ -1620,7 +1620,7 @@ bool appendCliMan(const String& topic)
         appendCliLine("EXAMPLES");
         appendCliLine("  ssh list");
         appendCliLine("  ssh connect 0");
-        appendCliLine("  ssh airpocket@192.168.50.7");
+        appendCliLine("  ssh demo@192.0.2.10");
         appendCliLine("SEE ALSO");
         appendCliLine("  ssh connect, ssh disconnect");
         return true;
@@ -1636,8 +1636,8 @@ bool appendCliMan(const String& topic)
     if (key == "ssh direct" || key == "ssh user@host" || key == "ssh user@host[:port]") {
         appendCliManEntry("ssh direct", "ssh user@host[:port] [password]", "Connect without a saved profile.");
         appendCliLine("EXAMPLES");
-        appendCliLine("  ssh airpocket@192.168.50.7");
-        appendCliLine("  ssh airpocket@192.168.50.7:22");
+        appendCliLine("  ssh demo@192.0.2.10");
+        appendCliLine("  ssh demo@192.0.2.10:22");
         return true;
     }
     if (key == "scp" || key == "scp get" || key == "scp put") {
@@ -1648,10 +1648,10 @@ bool appendCliMan(const String& topic)
         appendCliLine("  get: SSH server -> Tab5 microSD");
         appendCliLine("  put: Tab5 microSD -> SSH server");
         appendCliLine("EXAMPLES");
-        appendCliLine("  scp get airpocket@192.168.50.7:/home/airpocket/test.py /test.py");
-        appendCliLine("  scp put /test.py airpocket@192.168.50.7:/home/airpocket/test.py");
-        appendCliLine("  scp get /home/airpocket/test.py /test.py 0");
-        appendCliLine("  scp put /test.py /home/airpocket/test.py 0");
+        appendCliLine("  scp get demo@192.0.2.10:/home/demo/test.py /test.py");
+        appendCliLine("  scp put /test.py demo@192.0.2.10:/home/demo/test.py");
+        appendCliLine("  scp get /home/demo/test.py /test.py 0");
+        appendCliLine("  scp put /test.py /home/demo/test.py 0");
         appendCliLine("CHECK");
         appendCliLine("  ls -l /");
         appendCliLine("  cat /test.py");

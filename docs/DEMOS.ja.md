@@ -19,14 +19,14 @@ cat /life.txt
 Tab5のSSHプロファイルを使う例:
 
 ```text
-scp get /home/airpocket/mandel.py /mandel.py 0
-scp get /home/airpocket/mandel.txt /mandel.txt 0
+scp get /home/demo/mandel.py /mandel.py 0
+scp get /home/demo/mandel.txt /mandel.txt 0
 ```
 
 直接SCPエンドポイントを指定する例:
 
 ```text
-scp get airpocket@192.168.50.7:/home/airpocket/plasma.py /plasma.py
+scp get demo@192.0.2.10:/home/demo/plasma.py /plasma.py
 ```
 
 ## Mandelbrot

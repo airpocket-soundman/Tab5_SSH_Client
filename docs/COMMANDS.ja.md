@@ -45,7 +45,7 @@ Linux風コマンドを提供します。完全なPOSIXシェルではありま�
 | `ssh list` | 保存済みSSHプロファイルを表示します。 | `ssh list` |
 | `ssh connect <index>` | 保存済みSSHプロファイルへ接続します。 | `ssh connect 0` |
 | `ssh disconnect` | アクティブなSSHセッションを切断します。 | `ssh disconnect` |
-| `ssh user@host[:port] [password]` | プロファイル保存なしで直接接続します。 | `ssh airpocket@192.168.50.7` |
+| `ssh user@host[:port] [password]` | プロファイル保存なしで直接接続します。 | `ssh demo@192.0.2.10` |
 
 直接SSHコマンドでパスワードを省略した場合、同じhost/userまたはhost/user/portの保存済み
 プロファイルから認証情報の再利用を試みます。
@@ -57,10 +57,10 @@ SSHサーバへコピーします。
 
 | コマンド | 説明 | 例 |
 | --- | --- | --- |
-| `scp get <remote> <sd-local> [profile]` | プロファイル接続先からダウンロードします。 | `scp get /home/airpocket/test.py /test.py 0` |
-| `scp put <sd-local> <remote> [profile]` | プロファイル接続先へアップロードします。 | `scp put /test.py /home/airpocket/test.py 0` |
-| `scp get user@host:/remote <sd-local> [password]` | 直接エンドポイント指定でダウンロードします。 | `scp get airpocket@192.168.50.7:/home/airpocket/test.py /test.py` |
-| `scp put <sd-local> user@host:/remote [password]` | 直接エンドポイント指定でアップロードします。 | `scp put /test.py airpocket@192.168.50.7:/home/airpocket/test.py` |
+| `scp get <remote> <sd-local> [profile]` | プロファイル接続先からダウンロードします。 | `scp get /home/demo/test.py /test.py 0` |
+| `scp put <sd-local> <remote> [profile]` | プロファイル接続先へアップロードします。 | `scp put /test.py /home/demo/test.py 0` |
+| `scp get user@host:/remote <sd-local> [password]` | 直接エンドポイント指定でダウンロードします。 | `scp get demo@192.0.2.10:/home/demo/test.py /test.py` |
+| `scp put <sd-local> user@host:/remote [password]` | 直接エンドポイント指定でアップロードします。 | `scp put /test.py demo@192.0.2.10:/home/demo/test.py` |
 
 転送後の確認例:
 

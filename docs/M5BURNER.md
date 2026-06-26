@@ -13,7 +13,7 @@ Official references:
 Run this from the repository root:
 
 ```powershell
-.\tools\package_m5burner.ps1 -Version 0.1.0
+.\tools\package_m5burner.ps1 -Version 1.0.0
 ```
 
 The script builds the firmware and LittleFS image, then creates:
@@ -42,6 +42,12 @@ The flash offsets come from the ESP32-P4 PlatformIO/Arduino build:
 
 ## Publish from M5Burner
 
+## Release History
+
+- `1.0.0`: Released to M5Burner as the first public Tab5 SSH Client firmware.
+  The release uses a clean LittleFS image with dummy Wi-Fi/SSH profiles only.
+  Cover image: `assets/m5burner-cover.png`.
+
 1. Open M5Burner and sign in with a M5Stack community account.
 2. Open `USER CUSTOM`.
 3. Select `Publish`.
@@ -49,22 +55,20 @@ The flash offsets come from the ESP32-P4 PlatformIO/Arduino build:
 
 ```text
 Name: Tab5 SSH Client
-Version: 0.1.0
+Version: 1.0.0
 Device Type: Tab5
 Github: https://github.com/airpocket-soundman/Tab5_SSH_Client
-FirmWare: dist/m5burner/Tab5_SSH_Client-0.1.0.zip
-Cover: a screenshot or cover image for the firmware
+FirmWare: dist/m5burner/Tab5_SSH_Client-1.0.0.zip
+Cover: assets/m5burner-cover.png
 ```
 
 Suggested description:
 
 ```text
-SSH terminal firmware for M5Stack Tab5 with Tab5 Keyboard. Supports Wi-Fi and
-SSH profiles from LittleFS, direct ssh user@host[:port] connections, a scrollable
-terminal buffer, US/JP key mapping, USB keyboard input, and serial diagnostics.
-
-Before flashing, edit profiles.json or use the included sample profiles as
-placeholders. Do not publish real Wi-Fi passwords or SSH credentials.
+Portable SSH terminal firmware for M5Stack Tab5 with Tab5 Keyboard. Includes
+Wi-Fi and SSH profile management, Tab5sh Linux-like shell, adjustable terminal
+fonts, microSD filesystem commands, SCP file transfer, embedded MicroPython,
+and an M5GFX-backed graphics API for Python demos.
 ```
 
 5. Click `Upload`.

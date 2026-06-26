@@ -1,5 +1,5 @@
 param(
-    [string]$Version = "0.1.0",
+    [string]$Version = "1.0.0",
     [string]$Author = "airpocket-soundman",
     [string]$Repository = "https://github.com/airpocket-soundman/Tab5_SSH_Client",
     [string]$Device = "Tab5"

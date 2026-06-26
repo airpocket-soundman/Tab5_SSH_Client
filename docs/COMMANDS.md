@@ -47,7 +47,7 @@ built-in commands. Demo scripts have `.txt` help files on SD, such as
 | `ssh list` | List saved SSH profiles. | `ssh list` |
 | `ssh connect <index>` | Connect to a saved SSH profile. | `ssh connect 0` |
 | `ssh disconnect` | Disconnect the active SSH session. | `ssh disconnect` |
-| `ssh user@host[:port] [password]` | Connect without saving a profile. | `ssh airpocket@192.168.50.7` |
+| `ssh user@host[:port] [password]` | Connect without saving a profile. | `ssh demo@192.0.2.10` |
 
 If the direct SSH command omits the password, the firmware tries to reuse
 credentials from a saved profile with the same host/user or host/user/port.
@@ -59,10 +59,10 @@ Tab5 microSD to the SSH server.
 
 | Command | Description | Example |
 | --- | --- | --- |
-| `scp get <remote> <sd-local> [profile]` | Download from profile target. | `scp get /home/airpocket/test.py /test.py 0` |
-| `scp put <sd-local> <remote> [profile]` | Upload to profile target. | `scp put /test.py /home/airpocket/test.py 0` |
-| `scp get user@host:/remote <sd-local> [password]` | Download using direct endpoint. | `scp get airpocket@192.168.50.7:/home/airpocket/test.py /test.py` |
-| `scp put <sd-local> user@host:/remote [password]` | Upload using direct endpoint. | `scp put /test.py airpocket@192.168.50.7:/home/airpocket/test.py` |
+| `scp get <remote> <sd-local> [profile]` | Download from profile target. | `scp get /home/demo/test.py /test.py 0` |
+| `scp put <sd-local> <remote> [profile]` | Upload to profile target. | `scp put /test.py /home/demo/test.py 0` |
+| `scp get user@host:/remote <sd-local> [password]` | Download using direct endpoint. | `scp get demo@192.0.2.10:/home/demo/test.py /test.py` |
+| `scp put <sd-local> user@host:/remote [password]` | Upload using direct endpoint. | `scp put /test.py demo@192.0.2.10:/home/demo/test.py` |
 
 Useful checks after transfer:
 

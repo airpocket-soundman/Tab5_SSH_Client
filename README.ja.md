@@ -119,8 +119,8 @@ cat /life.txt
 df
 mkdir /scripts
 rmdir /scripts
-scp get /home/airpocket/test.py /test.py 0
-scp put /test.py /home/airpocket/test.py 0
+scp get /home/demo/test.py /test.py 0
+scp put /test.py /home/demo/test.py 0
 python /life.py
 python /mandel.py 0 1 8 -1
 python /plasma.py 0 160 16
