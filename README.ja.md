@@ -165,6 +165,17 @@ term dump
 `tools/serial_bridge.ps1` を使うと、起動確認中のシリアルログ保存やコマンド送信が
 できます。
 
+## M5Burner
+
+M5Burnerへアップロードするパッケージは次のコマンドで作成できます。
+
+```powershell
+.\tools\package_m5burner.ps1 -Version 0.1.0
+```
+
+公開手順と入力するメタデータは [docs/M5BURNER.md](docs/M5BURNER.md) を参照して
+ください。
+
 ## リポジトリ構成
 
 ```text

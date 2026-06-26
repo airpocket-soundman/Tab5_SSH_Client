@@ -165,6 +165,17 @@ term dump
 `tools/serial_bridge.ps1` can log serial output and send commands from a text
 file during bring-up.
 
+## M5Burner
+
+To prepare a M5Burner upload package:
+
+```powershell
+.\tools\package_m5burner.ps1 -Version 0.1.0
+```
+
+See [docs/M5BURNER.md](docs/M5BURNER.md) for the publishing workflow and
+metadata fields.
+
 ## Repository Layout
 
 ```text
