@@ -8,18 +8,18 @@ replacing the SSH terminal firmware.
 ## Commands
 
 ```text
-py repl
-py exec <statement>
-py run <sd.py>
-py reset
+python
+python <sd.py>
+python -c <statement>
+python --reset
 ```
 
 Serial API commands:
 
 ```text
-py exec <statement>
-py run <sd.py>
-py reset
+python -c <statement>
+python <sd.py>
+python --reset
 sd write <path> <text>
 sd append <path> <text>
 sd cat <path>
@@ -55,5 +55,5 @@ blink(2, 3, 100)
 ```
 
 The command surface is intentionally compatible with a future full MicroPython
-backend, so `py repl` and `py run` can stay stable if the runner is later
+backend, so `python` and `python <sd.py>` can stay stable if the runner is later
 replaced by an embedded VM or a dedicated MicroPython firmware mode.

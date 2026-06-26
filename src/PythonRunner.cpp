@@ -441,7 +441,7 @@ bool PythonRunner::callFunction(String line, Output output)
         output("  led = Pin(pin, Pin.OUT); led.on(); led.off(); led.value(0|1)");
         output("  pin(pin, value), digitalWrite(pin, value), digitalRead(pin)");
         output("  blink(pin, count, ms), for i in range(n):");
-        output("  exit() leaves py repl");
+        output("  exit() leaves python REPL");
         return true;
     }
     setError(String("unknown function: ") + name);

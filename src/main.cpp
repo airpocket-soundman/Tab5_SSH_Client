@@ -1297,7 +1297,7 @@ void appendCliHelp()
     appendCliLine("  ssh user@host[:port] [password]");
     appendCliLine("  sd status, ls [path], cat <path>, sd write <path> <text>");
     appendCliLine("  scp get <remote> <sd-local>, scp put <sd-local> <remote>");
-    appendCliLine("  py repl, py run <sd.py>, py exec <statement>");
+    appendCliLine("  python, python <sd.py>, python -c <statement>");
     appendCliLine("  ble status, ble scan, ble forget");
 }
 
@@ -1403,13 +1403,14 @@ bool appendCliMan(const String& topic)
                           "Manage Bluetooth keyboard settings. Pairing backend depends on the Tab5 radio stack build.");
         return true;
     }
-    if (key == "py" || key == "python" || key == "py repl" || key == "py run" || key == "py exec") {
-        appendCliManEntry("py", "py repl | py run <sd.py> | py exec <statement>",
+    if (key == "python" || key == "python file" || key == "python -c") {
+        appendCliManEntry("python", "python | python <sd.py> | python -c <statement>",
                           "Run the built-in MicroPython-compatible subset with SD scripts and GPIO helpers.");
         appendCliLine("Examples:");
-        appendCliLine("  py exec print('hello')");
-        appendCliLine("  py exec blink(2, 3, 100)");
-        appendCliLine("  py run /scripts/blink.py");
+        appendCliLine("  python");
+        appendCliLine("  python test.py");
+        appendCliLine("  python /scripts/blink.py");
+        appendCliLine("  python -c print('hello')");
         return true;
     }
     if (key == "sd" || key == "sd status") {
@@ -1880,45 +1881,45 @@ bool handleBleCliCommand(const String&, const String& lower)
 
 bool handlePythonCliCommand(const String& command, const String& lower)
 {
-    if (lower == "py" || lower == "python" || lower == "py help" || lower == "python help") {
-        appendCliLine("py commands:");
-        appendCliLine("  py repl");
-        appendCliLine("  py run <sd.py>");
-        appendCliLine("  py exec <statement>");
-        appendCliLine("  py reset");
+    if (lower == "python help" || lower == "python --help" || lower == "python -h") {
+        appendCliLine("python commands:");
+        appendCliLine("  python");
+        appendCliLine("  python <sd.py>");
+        appendCliLine("  python -c <statement>");
+        appendCliLine("  python --reset");
         appendCliLine("GPIO subset: Pin, pin(), digitalWrite(), digitalRead(), blink()");
         return true;
     }
-    if (lower == "py repl" || lower == "python repl") {
+    if (lower == "python") {
         pythonReplMode = true;
         appendCliLine("MicroPython-compatible REPL subset. Type exit() to return.");
         return true;
     }
-    if (lower == "py reset" || lower == "python reset") {
+    if (lower == "python --reset") {
         python.reset();
-        appendCliLine("py: state reset");
+        appendCliLine("python: state reset");
         return true;
     }
-    if (lower.startsWith("py exec ") || lower.startsWith("python exec ")) {
-        size_t prefix = lower.startsWith("py exec ") ? strlen("py exec ") : strlen("python exec ");
-        String statement = command.substring(prefix);
+    if (lower.startsWith("python -c ")) {
+        String statement = command.substring(strlen("python -c "));
         if (!python.runLine(statement, appendPythonCliLine)) {
-            appendCliLine(String("py: ") + python.lastError());
+            appendCliLine(String("python: ") + python.lastError());
         }
         return true;
     }
-    if (lower.startsWith("py run ") || lower.startsWith("python run ")) {
+    if (lower.startsWith("python ")) {
         if (!ensureSdReady()) {
             appendCliLine(String("sd: ") + sdLastError);
             return true;
         }
-        size_t prefix = lower.startsWith("py run ") ? strlen("py run ") : strlen("python run ");
-        String path = normalizeSdPath(command.substring(prefix));
-        appendCliLine(String("py run ") + path);
+        String pathArg = command.substring(strlen("python "));
+        pathArg.trim();
+        String path = normalizeSdPath(pathArg);
+        appendCliLine(String("python ") + path);
         uint32_t start = millis();
         bool ok = python.runFile(SD, path, appendPythonCliLine);
-        appendCliLine(ok ? String("py: done in ") + (millis() - start) + " ms"
-                         : String("py: failed: ") + python.lastError());
+        appendCliLine(ok ? String("python: done in ") + (millis() - start) + " ms"
+                         : String("python: failed: ") + python.lastError());
         return true;
     }
     return false;
@@ -2115,9 +2116,9 @@ void executeLocalCommand()
     if (pythonReplMode) {
         if (line == "exit()" || line == "quit()" || line == "exit" || line == "quit") {
             pythonReplMode = false;
-            appendCliLine("py: exit");
+            appendCliLine("python: exit");
         } else if (line.length() && !python.runLine(line, appendPythonCliLine)) {
-            appendCliLine(String("py: ") + python.lastError());
+            appendCliLine(String("python: ") + python.lastError());
         }
         dirty = true;
         return;
@@ -4245,9 +4246,9 @@ void serialPrintHelp()
     Serial.println("  scp get user@host:/remote <sd-local> [password]");
     Serial.println("  scp put <sd-local> user@host:/remote [password]");
     Serial.println("  ble status|enable|disable|scan|pair <index>|forget");
-    Serial.println("  py exec <statement>");
-    Serial.println("  py run <sd.py>");
-    Serial.println("  py reset");
+    Serial.println("  python -c <statement>");
+    Serial.println("  python <sd.py>");
+    Serial.println("  python --reset");
     Serial.println("  term dump");
 }
 
@@ -4458,23 +4459,25 @@ void serialRunPythonCommand(const String& command)
 {
     String lower = command;
     lower.toLowerCase();
-    if (lower == "py reset") {
+    if (lower == "python --reset") {
         python.reset();
-        Serial.println("OK py state reset");
-    } else if (lower.startsWith("py exec ")) {
-        String statement = command.substring(strlen("py exec "));
+        Serial.println("OK python state reset");
+    } else if (lower.startsWith("python -c ")) {
+        String statement = command.substring(strlen("python -c "));
         bool ok = python.runLine(statement, serialPythonLine);
-        Serial.println(ok ? "OK py exec" : String("ERR py ") + python.lastError());
-    } else if (lower.startsWith("py run ")) {
+        Serial.println(ok ? "OK python -c" : String("ERR python ") + python.lastError());
+    } else if (lower.startsWith("python ")) {
         if (!ensureSdReady()) {
             Serial.printf("ERR sd %s\r\n", sdLastError.c_str());
             return;
         }
-        String path = normalizeSdPath(command.substring(strlen("py run ")));
+        String path = normalizeSdPath(command.substring(strlen("python ")));
         uint32_t start = millis();
         bool ok = python.runFile(SD, path, serialPythonLine);
-        Serial.println(ok ? String("OK py done ") + (millis() - start) + " ms"
-                          : String("ERR py ") + python.lastError());
+        Serial.println(ok ? String("OK python done ") + (millis() - start) + " ms"
+                          : String("ERR python ") + python.lastError());
+    } else if (lower == "python") {
+        Serial.println("ERR python REPL is available from the Tab5 CLI");
     } else {
         Serial.println("ERR usage");
     }
@@ -4654,7 +4657,8 @@ void handleSerialCommand(String command)
     } else if (command == "ble status" || command == "ble enable" || command == "ble disable" ||
                command == "ble scan" || command == "ble forget" || command.startsWith("ble pair ")) {
         serialRunBleCommand(command);
-    } else if (command == "py reset" || command.startsWith("py exec ") || command.startsWith("py run ")) {
+    } else if (command == "python" || command == "python --reset" || command.startsWith("python -c ") ||
+               command.startsWith("python ")) {
         serialRunPythonCommand(command);
     } else {
         Serial.println("ERR unknown command; type help");
