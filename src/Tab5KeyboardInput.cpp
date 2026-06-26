@@ -348,6 +348,9 @@ bool Tab5KeyboardInput::begin()
     } else {
         uint8_t fw = keyboard.firmwareVersion();
         keyboard.writeMode(m5::unit::tab5_keyboard::Mode::Character);
+        keyboard.writeRgbMode(m5::unit::tab5_keyboard::RgbMode::Custom);
+        keyboard.writeRgb(0, 0, 0, 0);
+        keyboard.writeRgb(1, 0, 0, 0);
         _status = String("Tab5 keyboard ready fw=0x") + String(fw, HEX);
         tab5Ready = true;
     }

@@ -1,0 +1,20 @@
+termgfx.py - helper reference for Tab5 gfx scripts
+
+Run:
+  This file is a reference/helper module, not a standalone demo.
+
+Available helpers:
+  rgb(r, g, b)
+  clear(color)
+  present()
+  size()
+  pixel(x, y, color)
+  line(x0, y0, x1, y1, color)
+  rect(x, y, w, h, color, fill)
+  circle(x, y, r, color, fill)
+  text(x, y, s, color)
+
+Notes:
+  Current embedded imports from SD are limited, so the demo scripts are still
+  mostly standalone. Use this file as a compact API reference when writing new
+  scripts.

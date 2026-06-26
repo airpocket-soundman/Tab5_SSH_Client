@@ -1,0 +1,25 @@
+plasma.py - sine plasma color-field demo
+
+Run:
+  python /plasma.py [wait_ms] [frames] [cell_px]
+
+Arguments:
+  wait_ms   Delay after each frame in milliseconds. Default: 0.
+  frames    Number of animation frames. Default: 80.
+  cell_px   Block size in pixels. Default: 16. Minimum: 6.
+
+Controls:
+  Ctrl-C or q stops the demo.
+
+Notes:
+  This is a classic demoscene-style plasma effect. Several sine waves,
+  including a radial distance wave, are combined into a moving color field.
+  Smaller cell_px values look smoother but require many more draw commands and
+  are slower.
+  The frame is drawn into the sprite first and then presented once per frame,
+  which is better for animation than row-by-row presentation.
+
+Examples:
+  python /plasma.py
+  python /plasma.py 20 120 16
+  python /plasma.py 0 60 10

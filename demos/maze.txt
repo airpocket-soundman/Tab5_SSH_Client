@@ -1,0 +1,21 @@
+maze.py - animated maze generation and solving demo
+
+Run:
+  python /maze.py [wait_ms] [cols] [rows]
+
+Arguments:
+  wait_ms   Delay after each animation step in milliseconds. Default: 0.
+  cols      Maze width in cells. Default: 31. Rounded down to an odd number.
+  rows      Maze height in cells. Default: 19. Rounded down to an odd number.
+
+Controls:
+  Ctrl-C or q stops the demo.
+
+Notes:
+  The demo first generates a maze, then solves it. Cell size is fixed at 18 px,
+  and the requested dimensions are clipped to fit the graphics area.
+
+Examples:
+  python /maze.py
+  python /maze.py 10
+  python /maze.py 0 25 17

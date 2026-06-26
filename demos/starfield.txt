@@ -1,0 +1,20 @@
+starfield.py - graphical starfield demo
+
+Run:
+  python /starfield.py [wait_ms] [frames] [speed]
+
+Arguments:
+  wait_ms   Delay after each frame in milliseconds. Default: 0.
+  frames    Number of frames to draw. Default: 30.
+  speed     Star movement speed. Default: 5.
+
+Controls:
+  Ctrl-C or q stops the demo.
+
+Notes:
+  Stars move from the center outward. Each frame clears the graphics area,
+  draws short star trails, then presents the sprite.
+
+Examples:
+  python /starfield.py
+  python /starfield.py 10 200 7

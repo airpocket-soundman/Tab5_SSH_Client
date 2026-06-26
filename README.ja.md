@@ -2,192 +2,189 @@
 
 [English](README.md) | 日本語
 
-M5Stack Tab5 をSSH端末として使うためのPlatformIOプロジェクトです。Tab5
-Keyboardを接続したTab5を対象に、Wi-Fiプロファイル、SSHプロファイル、キー入力、
-スクロール可能なターミナル表示を提供します。
+M5Stack Tab5 をポータブルSSH端末として使うためのファームウェアです。開発環境は
+PlatformIO、対象は Tab5、Tab5 Keyboard、microSD、Wi-Fi です。
 
-## 機能
+## 主な機能
 
-- M5Stack Tab5 / ESP32-P4 向けPlatformIOプロジェクト。
-- LittleFS上のJSONからWi-Fi/SSHプロファイルを読み込み。
-- SSH接続先を複数保存可能。
-- 直接入力形式: `ssh user@host[:port] [password]`。
-- `LibSSH-ESP32` を使ったインタラクティブSSHシェル。
-- 基本的なANSIエスケープ処理を持つスクロール可能なターミナルバッファ。
-- `M5Unit-KEYBOARD` 経由のTab5 Keyboard入力。
-- Tab5側でのUS/JPキーボードレイアウト変換。
-- 動作確認用のUSBキーボード入力パス。
-- 診断用のシリアルモニターAPI。
+- M5Stack Tab5 / ESP32-P4 向け PlatformIO プロジェクト。
+- Wi-Fi / SSH プロファイルをTab5上で管理し、フラッシュへ永続化。
+- 直接SSH接続コマンド: `ssh user@host[:port] [password]`。
+- `LibSSH-ESP32` による対話型SSHシェル。
+- `vim`、`nano`、`sl` などを想定したANSI/VT系ターミナル処理。
+- スクロールバック、コマンド編集、履歴呼び出し。
+- Tab5 Keyboard、USBキーボード、BLEキーボード設定経路。
+- Tab5側でのUS/JPキーレイアウト変換。
+- SSHホストとTab5 microSD間のSCP風ファイル転送。
+- SD操作、Wi-Fi、SSH/SCP、診断、Python実行用のLinux風ローカルCLI。
+- MicroPython REPL、`python -c`、SD上の `.py` 実行。
+- M5GFXスプライトを使うMicroPython向け `gfx` 描画API。
+- progressive Mandelbrot、sine plasma、wireframe hat、Life、starfield、
+  maze などのSDカードデモ。
 
-## 必要なもの
+## ドキュメント
+
+- [Command list](docs/COMMANDS.md)
+- [コマンド一覧](docs/COMMANDS.ja.md)
+- [Python and graphics](docs/PYTHON.md)
+- [Demo scripts](docs/DEMOS.md)
+- [デモスクリプト](docs/DEMOS.ja.md)
+
+## 必要なハードウェア
 
 - M5Stack Tab5
 - Tab5 Keyboard
-- 書き込み・シリアル確認用USBケーブル
+- microSDカード
+- 書き込みとシリアル診断用USBケーブル
 - Tab5から接続できるWi-Fiネットワーク
-
-アプリケーション構成とハードウェアメモは
-[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) を参照してください。
 
 ## ビルド
 
 PlatformIOをインストールし、このフォルダを開いて `tab5` 環境をビルドします。
 
 ```powershell
-pio run
+pio run -e tab5
 ```
 
-日本語Windows環境でパッケージ出力が `UnicodeEncodeError` になる場合は、UTF-8を
-有効にして実行してください。
+Windowsコンソールで文字コード由来のエラーが出る場合はUTF-8を有効にします。
 
 ```powershell
-$env:PYTHONUTF8='1'; pio run
+$env:PYTHONUTF8='1'; pio run -e tab5
 ```
 
-ファームウェアを書き込みます。
+ファームウェア書き込み:
 
 ```powershell
-pio run -t upload
-```
-
-LittleFSのプロファイルデータを書き込みます。
-
-```powershell
-pio run -t uploadfs
+pio run -e tab5 -t upload
 ```
 
 ## 設定
 
-`uploadfs` の前に `data/profiles.json` を編集します。
+プロファイルはTab5 UI上で編集でき、フラッシュに保存されます。
 
-- `wifi`: 上から順に接続を試すWi-Fiプロファイル。
-- `ssh`: Tab5のSSHプロファイル一覧に出る接続先。
-- `keyboard.layout`: `us` または `jp`。
-- `system.region` / `system.utcOffsetMinutes`: ローカル時刻表示用。
-
-SSHプロファイル例:
-
-```json
-{
-  "name": "linux-box",
-  "host": "192.0.2.10",
-  "port": 22,
-  "user": "demo",
-  "password": "change-me",
-  "terminal": "xterm-256color"
-}
-```
+- `WIFI`: Wi-Fiプロファイル、スキャン、追加、編集、接続、Wi-Fi on/off。
+- `SSH`: SSHプロファイル、追加、編集、接続。
+- `FONT`: ターミナルフォントと行間。
+- `CONF`: デバイス名、地域、UTCオフセット、NTP、キーマップなど。
 
 実際のWi-FiパスワードやSSH認証情報はコミットしないでください。
 
 ## 使い方
 
-1. `data/profiles.json` にWi-FiプロファイルとSSHプロファイルを1つ以上設定します。
-2. `pio run -t upload` でファームウェアを書き込みます。
-3. `pio run -t uploadfs` でプロファイルファイルを書き込みます。
-4. Tab5を再起動します。
-5. ステータス行にWi-Fi接続状態とIPアドレスが出るまで待ちます。
-6. `SSH` 画面を開き、プロファイルを選んで `CONNECT` を押します。
+1. ファームウェアを書き込みます。
+2. Tab5を再起動します。
+3. `WIFI` 画面でWi-Fiを設定します。
+4. `SSH` 画面でSSH接続先を設定します。
+5. プロファイルを選択して `CONNECT` を押します。
 
-ターミナルCLIから接続することもできます。
+ローカルCLIからも接続できます。
 
 ```text
 ssh list
 ssh connect 0
-```
-
-保存せずに一度だけ接続する場合:
-
-```text
 ssh demo@192.0.2.10:22
 ```
 
-直接接続コマンドにパスワードを書かない場合、同じhost/userまたはhost/user/portの
-保存済みプロファイルから認証情報を再利用します。
+直接SSHコマンドでパスワードを省略した場合、同じhost/userまたはhost/user/portの保存済み
+プロファイルから認証情報の再利用を試みます。
 
 ## 本体操作
 
-上部メニューバー内のボタンで主要画面を切り替えます。
+- `Esc`: ターミナル/コンテンツ領域と上部メニューバーのフォーカス切り替え。
+- `Tab`: メニュー、リスト、編集フィールド内のフォーカス移動。
+- 矢印キー: メニュー/設定ではフォーカス移動、ターミナルではカーソルキー送信。
+- `Ctrl+Up` / `Ctrl+Down`: ターミナルバッファのスクロール。
 
-- `TERM`: ターミナルと内蔵CLI。
-- `WIFI`: Wi-Fiプロファイルの一覧、スキャン、追加、編集、接続。
-- `SSH`: SSHプロファイルの一覧、追加、編集、接続。
-- `FONT`: ターミナルのフォントと行間。
-- `CONF`: デバイス名、地域、時差、NTP、キーマップ設定。
-- `CONN` / `DISC`: ターミナル画面から接続または切断。
+SSH接続中のターミナル画面では、`Esc` はリモートアプリへ送信されます。これにより
+`vim` のinsert modeから抜けられます。
 
-キーボードショートカット:
+## 内蔵CLI
 
-- `Esc`: ターミナル/コンテンツ領域と上部メニューバーのフォーカスを切り替え。
-- `Tab`: 上部メニューバー内、一覧画面、編集/設定画面内のフォーカスを移動。
-- `Ctrl+Up`: ターミナルバッファを上へスクロール。
-- `Ctrl+Down`: ターミナルバッファを下へスクロール。
-
-SSH接続中のターミナル画面では、`Esc` はリモートのシェル/アプリケーションへ送信
-され、上部メニューバーの有効化には使われません。
-
-よく使う内蔵CLIコマンド:
+内蔵CLIはLinux風ですが、完全なPOSIXシェルではありません。パイプ、リダイレクト、
+シェル展開、バックグラウンドジョブはありません。
 
 ```text
 help
+man <command>
 status
 wifi status
-wifi list
-ip addr
+wifi off
+wifi on
 ssh list
-ssh connect <index>
-ssh disconnect
-time sync
-clear
+ssh connect 0
+ssh user@host[:port] [password]
+ls /
+ls -lah /
+cat /life.txt
+df
+mkdir /scripts
+rmdir /scripts
+scp get /home/airpocket/test.py /test.py 0
+scp put /test.py /home/airpocket/test.py 0
+python /life.py
+python /mandel.py 0 1 8 -1
+python /plasma.py 0 160 16
 ```
 
-## Tailscaleホストへ接続する場合
+通常の `ls` は複数列表示、`ls -l` は1ファイル1行の詳細表示です。
 
-このファームウェアはESP32-P4上でTailscaleノードを動かしません。tailnet上のホスト
-へ接続したい場合は、Tab5が接続するネットワーク側にTailscaleゲートウェイ、サブ
-ネットルーター、またはSSHリレーを用意してください。そのうえで、Tab5のSSHプロ
-ファイルには到達可能なゲートウェイのアドレスとポートを設定します。
+## MicroPython と描画デモ
+
+ローカルCLIからREPL起動、1行実行、SD上の `.py` 実行ができます。
+
+```text
+python
+python -c print('hello')
+python /life.py
+```
+
+スクリプトには `argv` とグローバルな `gfx` オブジェクトが渡されます。描画命令は
+ファームウェア側のスプライトに描き、`gfx.present()` で画面へ転送します。
+描画スクリプトは `gfx.present()` のタイミングで `Ctrl-C` または `q` により中断できます。
+
+APIは [docs/PYTHON.md](docs/PYTHON.md)、同梱デモは
+[docs/DEMOS.ja.md](docs/DEMOS.ja.md) を参照してください。
+
+## Tailscaleホストへの接続
+
+このファームウェアはESP32-P4上でTailscaleノードを動かしません。tailnet上のホストへ
+接続したい場合は、Tab5が接続するネットワーク側にTailscale gateway、subnet router、
+テザリング中のTailscale端末、またはSSH relayを用意し、到達可能なアドレスとポートを
+SSHプロファイルに設定します。
 
 ## シリアル診断
 
-ファームウェアは `115200` baud で簡単なシリアルAPIを提供します。
+`115200` baudで診断用Serial APIを提供します。
 
 ```text
 help
 status
+sd ls /
 wifi status
 ssh list
 ssh connect [index]
 ssh disconnect
 term dump
+python /life.py 0 5
 ```
 
-`tools/serial_bridge.ps1` を使うと、起動確認中のシリアルログ保存やコマンド送信が
-できます。
-
-## M5Burner
-
-M5Burnerへアップロードするパッケージは次のコマンドで作成できます。
-
-```powershell
-.\tools\package_m5burner.ps1 -Version 0.1.0
-```
-
-公開手順と入力するメタデータは [docs/M5BURNER.md](docs/M5BURNER.md) を参照して
-ください。
+ホスト側ツールからシリアルポートを開くときは、DTR/RTS変化でボードがリセットされることが
+あるため注意してください。
 
 ## リポジトリ構成
 
 ```text
-data/       LittleFSへ書き込むプロファイルデータ
-docs/       アーキテクチャメモ
-include/    ヘッダー
+data/       LittleFSプロファイルデータ
+demos/      SDカード用Pythonデモと説明テキスト
+docs/       ドキュメント
+include/    ヘッダ
+lib/        組み込みMicroPythonとローカルライブラリ
 src/        ファームウェア本体
 tools/      補助スクリプト
 ```
 
-## ステータス
+## 状態
 
-このプロジェクトはTab5ハードウェアの立ち上げとモバイルSSH用途のための実験的な
-ファームウェアです。Wi-Fi挙動、フォントサイズ、ターミナルエスケープ処理、キー
-ボードマッピングは、利用環境に合わせて調整してください。
+Tab5ハードウェア立ち上げとモバイルSSH用途の実験的ファームウェアです。Wi-Fi挙動、
+ターミナルエスケープ処理、性能、フォント、キーボードマッピングは利用環境に合わせて
+調整してください。

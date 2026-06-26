@@ -1,0 +1,27 @@
+mandel.py - Mandelbrot set demo
+
+Run:
+  python /mandel.py [wait_ms] [frames] [final_cell_px] [hold_ms]
+
+Arguments:
+  wait_ms   Delay after each refinement pass in milliseconds. Default: 0.
+  frames    Number of zoom frames to draw. Default: 1.
+  final_cell_px
+            Final pixel block size. Default: 10. Minimum: 1.
+  hold_ms   Time to keep the final image on screen. Default: 60000.
+            Use -1 to hold until Ctrl-C or q.
+
+Controls:
+  Ctrl-C or q stops the demo.
+
+Notes:
+  The image is progressively refined. It starts with large blocks and redraws
+  the same view with smaller blocks until final_cell_px is reached.
+  Larger final_cell_px values are faster but lower resolution.
+
+Examples:
+  python /mandel.py
+  python /mandel.py 0 1 20
+  python /mandel.py 20 4 16
+  python /mandel.py 0 1 10 -1
+  python /mandel.py 0 1 1 -1

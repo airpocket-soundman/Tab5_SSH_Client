@@ -2,192 +2,190 @@
 
 English | [日本語](README.ja.md)
 
-M5Stack Tab5 SSH terminal firmware built with PlatformIO. The project targets a
-Tab5 with the Tab5 Keyboard and provides Wi-Fi profile loading, saved SSH
-profiles, keyboard input, and a scrollable terminal view.
+M5Stack Tab5 firmware that turns the Tab5 into a portable SSH terminal. It is
+built with PlatformIO and targets the Tab5 with the Tab5 Keyboard, microSD, and
+Wi-Fi.
 
 ## Features
 
 - PlatformIO project for M5Stack Tab5 / ESP32-P4.
-- Wi-Fi and SSH profile loading from LittleFS JSON.
-- Multiple saved SSH profiles with host, port, user, password, and terminal type.
-- Direct CLI connection syntax: `ssh user@host[:port] [password]`.
+- On-device Wi-Fi and SSH profile management persisted to flash.
+- Direct SSH command: `ssh user@host[:port] [password]`.
 - Interactive SSH shell using `LibSSH-ESP32`.
-- Scrollable terminal buffer with basic ANSI escape handling.
-- Tab5 Keyboard input through `M5Unit-KEYBOARD`.
+- ANSI/VT-style terminal handling for shells, `vim`, `nano`, `sl`, and similar apps.
+- Scrollback buffer and keyboard-driven command editing/history.
+- Tab5 Keyboard, USB keyboard, and BLE keyboard configuration paths.
 - US/JP keyboard layout mapping on the Tab5 side.
-- USB keyboard input path for bring-up and testing.
-- Serial monitor command API for diagnostics.
+- SCP-style file transfer between SSH hosts and the Tab5 microSD card.
+- Linux-like local CLI for SD files, Wi-Fi, SSH/SCP, diagnostics, and Python.
+- Embedded MicroPython runner for REPL, `python -c`, and SD-card scripts.
+- MicroPython graphics API backed by the firmware M5GFX sprite.
+- SD-card demos: progressive Mandelbrot, sine plasma, wireframe hat, Life,
+  starfield, and maze.
+
+## Documentation
+
+- [Command list](docs/COMMANDS.md)
+- [コマンド一覧](docs/COMMANDS.ja.md)
+- [Python and graphics](docs/PYTHON.md)
+- [Demo scripts](docs/DEMOS.md)
+- [デモスクリプト](docs/DEMOS.ja.md)
 
 ## Hardware
 
 - M5Stack Tab5
 - Tab5 Keyboard
+- microSD card
 - USB cable for flashing and serial diagnostics
 - Wi-Fi network reachable by the Tab5
-
-See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the application flow and
-hardware notes.
 
 ## Build
 
 Install PlatformIO, open this folder, then build the `tab5` environment.
 
 ```powershell
-pio run
+pio run -e tab5
 ```
 
-On Japanese Windows consoles, run PlatformIO with UTF-8 enabled if package
-output fails with `UnicodeEncodeError`.
+On Windows consoles, use UTF-8 if PlatformIO output fails with encoding errors.
 
 ```powershell
-$env:PYTHONUTF8='1'; pio run
+$env:PYTHONUTF8='1'; pio run -e tab5
 ```
 
 Upload firmware:
 
 ```powershell
-pio run -t upload
-```
-
-Upload the LittleFS profile data:
-
-```powershell
-pio run -t uploadfs
+pio run -e tab5 -t upload
 ```
 
 ## Configuration
 
-Edit `data/profiles.json` before running `uploadfs`.
+Profiles can be edited on the Tab5 UI and are persisted to flash.
 
-- `wifi`: Wi-Fi profiles are tried in order.
-- `ssh`: saved SSH targets shown in the Tab5 SSH profile list.
-- `keyboard.layout`: `us` or `jp`.
-- `system.region` and `system.utcOffsetMinutes`: used for local time display.
-
-Example SSH profile:
-
-```json
-{
-  "name": "linux-box",
-  "host": "192.0.2.10",
-  "port": 22,
-  "user": "demo",
-  "password": "change-me",
-  "terminal": "xterm-256color"
-}
-```
+- `WIFI`: saved Wi-Fi profiles, scan, add, edit, connect, Wi-Fi on/off.
+- `SSH`: saved SSH profiles, add, edit, connect.
+- `FONT`: terminal font and line spacing.
+- `CONF`: device name, region, UTC offset, NTP, keymap, and related settings.
 
 Do not commit real Wi-Fi passwords or SSH credentials.
 
 ## Usage
 
-1. Edit `data/profiles.json` with at least one Wi-Fi profile and one SSH profile.
-2. Upload the firmware with `pio run -t upload`.
-3. Upload the profile file with `pio run -t uploadfs`.
-4. Reboot the Tab5.
-5. Wait until the status line shows a connected Wi-Fi network and an IP address.
-6. Open the `SSH` screen, select a profile, and press `CONNECT`.
+1. Upload the firmware.
+2. Reboot the Tab5.
+3. Configure Wi-Fi from the `WIFI` screen.
+4. Configure SSH from the `SSH` screen.
+5. Select a profile and press `CONNECT`.
 
-You can also connect from the terminal CLI:
+You can also connect from the local CLI:
 
 ```text
 ssh list
 ssh connect 0
-```
-
-For a one-off connection without saving a profile:
-
-```text
 ssh demo@192.0.2.10:22
 ```
 
-If a password is not provided in the direct command, the firmware tries to reuse
+If a direct SSH command omits the password, the firmware tries to reuse
 credentials from a saved profile with the same host/user or host/user/port.
 
 ## On-Device Controls
 
-The buttons in the top menu bar switch between the main screens:
-
-- `TERM`: terminal and built-in CLI.
-- `WIFI`: saved Wi-Fi profiles, scan, add, edit, and connect.
-- `SSH`: saved SSH profiles, add, edit, and connect.
-- `FONT`: terminal font and line spacing.
-- `CONF`: device, region, time offset, NTP, and keymap settings.
-- `CONN` / `DISC`: connect or disconnect from the current terminal screen.
-
-Keyboard shortcuts:
-
 - `Esc`: switch focus between the terminal/content area and the top menu bar.
-- `Tab`: move focus within the top menu bar, list screens, and edit/settings fields.
-- `Ctrl+Up`: scroll the terminal buffer upward.
-- `Ctrl+Down`: scroll the terminal buffer downward.
+- `Tab`: move focus in menus, lists, and edit fields.
+- Arrow keys: move focus in menus/settings, or send cursor movement to terminal apps.
+- `Ctrl+Up` / `Ctrl+Down`: scroll the terminal buffer.
 
 When an SSH session is active on the terminal screen, `Esc` is sent to the
-remote shell/application and does not activate the top menu bar.
+remote application so `vim` can leave insert mode.
 
-Useful built-in CLI commands:
+## Built-In CLI
+
+The built-in CLI is Linux-like, not a full POSIX shell. There are no pipelines,
+redirection, shell expansion, or background jobs.
 
 ```text
 help
+man <command>
 status
 wifi status
-wifi list
-ip addr
+wifi off
+wifi on
 ssh list
-ssh connect <index>
-ssh disconnect
-time sync
-clear
+ssh connect 0
+ssh user@host[:port] [password]
+ls /
+ls -lah /
+cat /life.txt
+df
+mkdir /scripts
+rmdir /scripts
+scp get /home/airpocket/test.py /test.py 0
+scp put /test.py /home/airpocket/test.py 0
+python /life.py
+python /mandel.py 0 1 8 -1
+python /plasma.py 0 160 16
 ```
 
-## Connecting to Tailscale hosts
+Normal `ls` uses multi-column output; `ls -l` uses one file per line.
+
+## MicroPython And Graphics
+
+The local CLI can start the embedded REPL or run `.py` files from microSD:
+
+```text
+python
+python -c print('hello')
+python /life.py
+```
+
+Scripts receive `argv` and a global `gfx` object. Drawing commands render into
+the firmware sprite, and `gfx.present()` pushes that sprite to the display.
+Graphics scripts can be interrupted at `gfx.present()` with `Ctrl-C` or `q`.
+
+See [docs/PYTHON.md](docs/PYTHON.md) for the API and
+[docs/DEMOS.md](docs/DEMOS.md) for bundled demo scripts.
+
+## Tailscale Hosts
 
 This firmware does not run a Tailscale node on the ESP32-P4. To connect to a
 tailnet host, put the Tab5 on a network that has a Tailscale gateway, subnet
-router, or another SSH relay. Then configure the SSH profile with the reachable
-gateway address and port.
+router, tethered Tailscale device, or SSH relay, then configure the SSH profile
+with the reachable address and port.
 
 ## Serial Diagnostics
 
-The firmware exposes a small serial API at `115200` baud:
+The firmware exposes a serial API at `115200` baud for diagnostics:
 
 ```text
 help
 status
+sd ls /
 wifi status
 ssh list
 ssh connect [index]
 ssh disconnect
 term dump
+python /life.py 0 5
 ```
 
-`tools/serial_bridge.ps1` can log serial output and send commands from a text
-file during bring-up.
-
-## M5Burner
-
-To prepare a M5Burner upload package:
-
-```powershell
-.\tools\package_m5burner.ps1 -Version 0.1.0
-```
-
-See [docs/M5BURNER.md](docs/M5BURNER.md) for the publishing workflow and
-metadata fields.
+When opening the serial port from host tools, avoid unnecessary DTR/RTS
+transitions because they may reset the board.
 
 ## Repository Layout
 
 ```text
 data/       LittleFS profile data
-docs/       Architecture notes
+demos/      SD-card Python demo scripts and text help
+docs/       Documentation
 include/    Headers
+lib/        Embedded MicroPython and local libraries
 src/        Firmware source
 tools/      Helper scripts
 ```
 
 ## Status
 
-This is an experimental firmware project for Tab5 hardware bring-up and mobile
-SSH use. Expect to tune Wi-Fi behavior, font sizing, terminal escape handling,
-and keyboard mapping for your own setup.
+This is experimental firmware for Tab5 hardware bring-up and mobile SSH use.
+Expect to tune Wi-Fi behavior, terminal escape handling, performance, fonts,
+and keyboard mappings for your own setup.

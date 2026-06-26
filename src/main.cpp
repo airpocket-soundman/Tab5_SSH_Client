@@ -84,6 +84,7 @@ size_t focusedHeaderButton = 0;
 size_t focusedContentItem = 0;
 bool wifiScanActive = false;
 WifiConnectState wifiState = WifiConnectState::Idle;
+volatile bool wifiDisabled = false;
 size_t wifiProfileIndex = 0;
 uint32_t wifiAttemptStart = 0;
 uint32_t wifiRetryAt = 0;
@@ -106,6 +107,18 @@ bool sdReady = false;
 bool sdInitAttempted = false;
 String sdLastError = "not initialized";
 String sdCwd = "/";
+struct SdModeEntry {
+    String path;
+    uint16_t mode;
+};
+std::vector<SdModeEntry> sdModes;
+bool sdModesLoaded = false;
+struct LsOptions {
+    bool longFormat{false};
+    bool all{false};
+    bool human{false};
+    String path;
+};
 String serialCommand;
 String commandLine;
 size_t commandCursor = 0;
@@ -133,7 +146,7 @@ constexpr int SD_SPI_MISO_PIN = 39;
 
 constexpr int HeaderH = 44;
 constexpr int HeaderTouchH = HeaderH * 3;
-constexpr int ContentTopGap = 30;
+constexpr int ContentTopGap = 56;
 
 constexpr Rect BtnTerminal{4, 4, 72, 36};
 constexpr Rect BtnWifi{82, 4, 72, 36};
@@ -149,6 +162,7 @@ constexpr Rect BtnDelete{714, 4, 72, 36};
 constexpr Rect BodyBtn1{8, HeaderH + ContentTopGap, 112, 48};
 constexpr Rect BodyBtn2{132, HeaderH + ContentTopGap, 112, 48};
 constexpr Rect BodyBtn3{256, HeaderH + ContentTopGap, 150, 48};
+constexpr Rect BodyBtn4{418, HeaderH + ContentTopGap, 112, 48};
 constexpr Rect FontMinusBtn{8, HeaderH + ContentTopGap, 112, 48};
 constexpr Rect FontPlusBtn{132, HeaderH + ContentTopGap, 112, 48};
 constexpr Rect FontSaveBtn{256, HeaderH + ContentTopGap, 150, 48};
@@ -165,11 +179,214 @@ bool sendSshText(const String& text);
 void appendStatus(const String& message);
 void startTimeSync(bool force = false);
 void setWifiStatus(const String& message);
+void startWifiReconnect(uint32_t timeoutMs = 20000);
+void stopWifiRuntime();
+void enableWifiRuntime(uint32_t timeoutMs = 20000);
 bool drawFallbackUnicodeGlyph(uint32_t cp, int x, int y, int w, int h, uint16_t fg, uint16_t bg);
+void drawHeader();
+extern "C" bool tab5_python_gfx_command(const char* command);
+extern "C" int tab5_python_gfx_width();
+extern "C" int tab5_python_gfx_height();
 
 bool headerButtonContains(const Rect& r, int px, int py)
 {
     return px >= r.x && px < r.x + r.w && py >= 0 && py < HeaderTouchH;
+}
+
+uint16_t gfxColor(uint32_t rgb)
+{
+    return lgfx::color565((rgb >> 16) & 0xff, (rgb >> 8) & 0xff, rgb & 0xff);
+}
+
+String gfxTakeToken(String& rest)
+{
+    rest.trim();
+    int split = rest.indexOf(' ');
+    if (split < 0) {
+        String token = rest;
+        rest = "";
+        return token;
+    }
+    String token = rest.substring(0, split);
+    rest = rest.substring(split + 1);
+    return token;
+}
+
+int gfxToInt(String& rest, int fallback = 0)
+{
+    String token = gfxTakeToken(rest);
+    if (!token.length()) {
+        return fallback;
+    }
+    return static_cast<int>(strtol(token.c_str(), nullptr, 0));
+}
+
+uint8_t gfxHexNibble(char c)
+{
+    if (c >= '0' && c <= '9') {
+        return c - '0';
+    }
+    if (c >= 'a' && c <= 'f') {
+        return c - 'a' + 10;
+    }
+    if (c >= 'A' && c <= 'F') {
+        return c - 'A' + 10;
+    }
+    return 0;
+}
+
+bool gfxBitAt(const String& bits, int index)
+{
+    int nibbleIndex = index >> 2;
+    if (nibbleIndex < 0 || nibbleIndex >= static_cast<int>(bits.length())) {
+        return false;
+    }
+    uint8_t nibble = gfxHexNibble(bits[nibbleIndex]);
+    int shift = 3 - (index & 3);
+    return ((nibble >> shift) & 1) != 0;
+}
+
+int gfxY(int y)
+{
+    return HeaderH + y;
+}
+
+bool pollPythonAbortInput()
+{
+    M5.update();
+    keyboard.update();
+    while (keyboard.available()) {
+        KeyAction action = keyboard.read();
+        if (action.type != KeyActionType::Text || !action.text.length()) {
+            continue;
+        }
+        char c = action.text[0];
+        if (c == 0x03 || c == 'q' || c == 'Q') {
+            return true;
+        }
+    }
+    return false;
+}
+
+extern "C" int tab5_python_gfx_width()
+{
+    return screenSpriteReady ? screenSprite.width() : M5.Display.width();
+}
+
+extern "C" int tab5_python_gfx_height()
+{
+    int h = screenSpriteReady ? screenSprite.height() : M5.Display.height();
+    return max<int>(1, h - HeaderH);
+}
+
+extern "C" bool tab5_python_gfx_command(const char* command)
+{
+    if (!command || !screenSpriteReady) {
+        return true;
+    }
+    String rest(command);
+    String op = gfxTakeToken(rest);
+    op.toLowerCase();
+    const int canvasW = tab5_python_gfx_width();
+    const int canvasH = tab5_python_gfx_height();
+    screen = Screen::Terminal;
+    keyboardMenuMode = false;
+
+    if (op == "clear") {
+        uint32_t color = static_cast<uint32_t>(gfxToInt(rest, 0));
+        screenSprite.fillRect(0, HeaderH, canvasW, canvasH, gfxColor(color));
+        return true;
+    }
+    if (op == "present") {
+        drawHeader();
+        screenSprite.pushSprite(0, 0);
+        dirty = false;
+        headerDirty = false;
+        if (pollPythonAbortInput()) {
+            appendStatus("python: interrupted");
+            return false;
+        }
+        return true;
+    }
+    if (op == "px") {
+        int x = gfxToInt(rest);
+        int y = gfxToInt(rest);
+        uint32_t color = static_cast<uint32_t>(gfxToInt(rest, 0xffffff));
+        if (x >= 0 && x < canvasW && y >= 0 && y < canvasH) {
+            screenSprite.drawPixel(x, gfxY(y), gfxColor(color));
+        }
+        return true;
+    }
+    if (op == "line") {
+        int x0 = gfxToInt(rest);
+        int y0 = gfxToInt(rest);
+        int x1 = gfxToInt(rest);
+        int y1 = gfxToInt(rest);
+        uint32_t color = static_cast<uint32_t>(gfxToInt(rest, 0xffffff));
+        screenSprite.drawLine(x0, gfxY(y0), x1, gfxY(y1), gfxColor(color));
+        return true;
+    }
+    if (op == "rect") {
+        int x = gfxToInt(rest);
+        int y = gfxToInt(rest);
+        int w = gfxToInt(rest);
+        int h = gfxToInt(rest);
+        uint32_t color = static_cast<uint32_t>(gfxToInt(rest, 0xffffff));
+        bool fill = gfxToInt(rest, 1) != 0;
+        if (fill) {
+            screenSprite.fillRect(x, gfxY(y), w, h, gfxColor(color));
+        } else {
+            screenSprite.drawRect(x, gfxY(y), w, h, gfxColor(color));
+        }
+        return true;
+    }
+    if (op == "circle") {
+        int x = gfxToInt(rest);
+        int y = gfxToInt(rest);
+        int r = gfxToInt(rest);
+        uint32_t color = static_cast<uint32_t>(gfxToInt(rest, 0xffffff));
+        bool fill = gfxToInt(rest, 1) != 0;
+        if (fill) {
+            screenSprite.fillCircle(x, gfxY(y), r, gfxColor(color));
+        } else {
+            screenSprite.drawCircle(x, gfxY(y), r, gfxColor(color));
+        }
+        return true;
+    }
+    if (op == "mono") {
+        int x0 = gfxToInt(rest);
+        int y0 = gfxToInt(rest);
+        int cols = gfxToInt(rest);
+        int rows = gfxToInt(rest);
+        int cell = gfxToInt(rest);
+        uint32_t fg = static_cast<uint32_t>(gfxToInt(rest, 0xffffff));
+        uint32_t bg = static_cast<uint32_t>(gfxToInt(rest, 0));
+        rest.trim();
+        if (cols <= 0 || rows <= 0 || cell <= 0 || cols > 128 || rows > 128) {
+            return true;
+        }
+        uint16_t fg565 = gfxColor(fg);
+        uint16_t bg565 = gfxColor(bg);
+        for (int y = 0; y < rows; ++y) {
+            for (int x = 0; x < cols; ++x) {
+                bool on = gfxBitAt(rest, y * cols + x);
+                screenSprite.fillRect(x0 + x * cell + 1, gfxY(y0 + y * cell + 1),
+                                      max(1, cell - 2), max(1, cell - 2), on ? fg565 : bg565);
+            }
+        }
+        return true;
+    }
+    if (op == "text") {
+        int x = gfxToInt(rest);
+        int y = gfxToInt(rest);
+        uint32_t color = static_cast<uint32_t>(gfxToInt(rest, 0xffffff));
+        screenSprite.setFont(&fonts::AsciiFont8x16);
+        screenSprite.setTextSize(1);
+        screenSprite.setTextColor(gfxColor(color), TFT_BLACK);
+        screenSprite.drawString(rest, x, gfxY(y));
+        return true;
+    }
+    return true;
 }
 
 const Rect* headerButtonAt(size_t index)
@@ -422,7 +639,17 @@ int settingRowH()
 
 int settingListTop()
 {
+    if (screen == Screen::WifiEdit || screen == Screen::SshEdit || screen == Screen::ConfigEdit) {
+        return HeaderH + 38;
+    }
     return BodyBtn1.y + BodyBtn1.h + 18;
+}
+
+void drawSettingsTitle(const char* title)
+{
+    setSettingsFontForLine();
+    screenSprite.setTextColor(TFT_GREEN, TFT_BLACK);
+    screenSprite.drawString(title, 8, HeaderH + 8);
 }
 
 uint8_t utf8CharLength(uint8_t c)
@@ -1292,12 +1519,14 @@ void appendCliHelp()
     appendCliLine("Tab5 CLI commands:");
     appendCliLine("  help, man <command>, clear, status, history");
     appendCliLine("  uname, whoami, hostname, date, uptime, echo");
-    appendCliLine("  wifi status, wifi list, ip addr");
+    appendCliLine("  wifi status, wifi list, wifi off, wifi on, ip addr");
     appendCliLine("  ssh list, ssh connect <index>, ssh disconnect");
     appendCliLine("  ssh user@host[:port] [password]");
-    appendCliLine("  sd status, ls [path], cat <path>, sd write <path> <text>");
+    appendCliLine("  sd status, df, ls [-lah] [path], cat <path>, chmod <mode> <path>");
+    appendCliLine("  mkdir <path>, rmdir <path>");
+    appendCliLine("  sd write <path> <text>");
     appendCliLine("  scp get <remote> <sd-local>, scp put <sd-local> <remote>");
-    appendCliLine("  python, python <sd.py>, python -c <statement>");
+    appendCliLine("  python, python <sd.py> [args...], python -c <statement>");
     appendCliLine("  ble status, ble scan, ble forget");
 }
 
@@ -1321,7 +1550,7 @@ bool appendCliMan(const String& topic)
     }
     if (!key.length() || key == "help" || key == "man") {
         appendCliManEntry("man", "man <command>", "Show help for Tab5 CLI built-in commands.");
-        appendCliLine("Try: man clear, man date, man wifi, man ssh");
+        appendCliLine("Try: man clear, man date, man wifi, man ssh, man scp, man python");
         return true;
     }
     if (key == "clear" || key == "cls" || key == "reset") {
@@ -1361,9 +1590,21 @@ bool appendCliMan(const String& topic)
         return true;
     }
     if (key == "wifi" || key == "wifi status") {
-        appendCliManEntry("wifi status", "wifi status", "Show Wi-Fi connection state, IP address, and SSID.");
+        appendCliManEntry("wifi status", "wifi status | wifi off | wifi on", "Show or change Wi-Fi runtime state.");
+        appendCliLine("EXAMPLES");
+        appendCliLine("  wifi status");
+        appendCliLine("  wifi off");
+        appendCliLine("  wifi on");
         appendCliLine("SEE ALSO");
         appendCliLine("  wifi list");
+        return true;
+    }
+    if (key == "wifi off") {
+        appendCliManEntry("wifi off", "wifi off", "Turn off Wi-Fi runtime and stop retry/reconnect attempts.");
+        return true;
+    }
+    if (key == "wifi on") {
+        appendCliManEntry("wifi on", "wifi on", "Turn Wi-Fi runtime back on and start reconnecting to the active profile.");
         return true;
     }
     if (key == "wifi list") {
@@ -1376,6 +1617,10 @@ bool appendCliMan(const String& topic)
     }
     if (key == "ssh" || key == "ssh list") {
         appendCliManEntry("ssh list", "ssh list", "List saved SSH profiles and the active profile marker.");
+        appendCliLine("EXAMPLES");
+        appendCliLine("  ssh list");
+        appendCliLine("  ssh connect 0");
+        appendCliLine("  ssh airpocket@192.168.50.7");
         appendCliLine("SEE ALSO");
         appendCliLine("  ssh connect, ssh disconnect");
         return true;
@@ -1390,37 +1635,78 @@ bool appendCliMan(const String& topic)
     }
     if (key == "ssh direct" || key == "ssh user@host" || key == "ssh user@host[:port]") {
         appendCliManEntry("ssh direct", "ssh user@host[:port] [password]", "Connect without a saved profile.");
+        appendCliLine("EXAMPLES");
+        appendCliLine("  ssh airpocket@192.168.50.7");
+        appendCliLine("  ssh airpocket@192.168.50.7:22");
         return true;
     }
     if (key == "scp" || key == "scp get" || key == "scp put") {
         appendCliManEntry("scp", "scp get <remote> <sd-local> [profile] | scp put <sd-local> <remote> [profile]",
                           "Copy files between the active SSH profile and the Tab5 microSD card.");
         appendCliLine("Direct endpoints are supported: user@host:/path.");
+        appendCliLine("DIRECTION");
+        appendCliLine("  get: SSH server -> Tab5 microSD");
+        appendCliLine("  put: Tab5 microSD -> SSH server");
+        appendCliLine("EXAMPLES");
+        appendCliLine("  scp get airpocket@192.168.50.7:/home/airpocket/test.py /test.py");
+        appendCliLine("  scp put /test.py airpocket@192.168.50.7:/home/airpocket/test.py");
+        appendCliLine("  scp get /home/airpocket/test.py /test.py 0");
+        appendCliLine("  scp put /test.py /home/airpocket/test.py 0");
+        appendCliLine("CHECK");
+        appendCliLine("  ls -l /");
+        appendCliLine("  cat /test.py");
+        appendCliLine("  python /test.py");
         return true;
     }
     if (key == "ble" || key == "ble status" || key == "ble scan" || key == "ble forget") {
         appendCliManEntry("ble", "ble status | ble scan | ble forget",
                           "Manage Bluetooth keyboard settings. Pairing backend depends on the Tab5 radio stack build.");
+        appendCliLine("EXAMPLES");
+        appendCliLine("  ble status");
+        appendCliLine("  ble scan");
+        appendCliLine("  ble forget");
         return true;
     }
     if (key == "python" || key == "python file" || key == "python -c") {
-        appendCliManEntry("python", "python | python <sd.py> | python -c <statement>",
+        appendCliManEntry("python", "python | python <sd.py> [args...] | python -c <statement>",
                           "Run the built-in MicroPython-compatible subset with SD scripts and GPIO helpers.");
         appendCliLine("Examples:");
         appendCliLine("  python");
-        appendCliLine("  python test.py");
+        appendCliLine("  python test.py 50");
         appendCliLine("  python /scripts/blink.py");
         appendCliLine("  python -c print('hello')");
         return true;
     }
     if (key == "sd" || key == "sd status") {
-        appendCliManEntry("sd status", "sd status", "Show microSD mount state, type, size, and current directory.");
+        appendCliManEntry("sd status", "sd status | df | sd df", "Show microSD mount state, size, used, available space, and current directory.");
+        appendCliLine("EXAMPLES");
+        appendCliLine("  sd status");
+        appendCliLine("  df");
         appendCliLine("SEE ALSO");
-        appendCliLine("  sd ls, sd cat, sd write, sd append, sd mkdir, sd rm");
+        appendCliLine("  sd ls, sd cat, sd write, sd append, mkdir, rmdir, sd rm");
+        return true;
+    }
+    if (key == "df" || key == "sd df" || key == "free" || key == "sd free") {
+        appendCliManEntry("df", "df | sd df", "Show microSD size, used space, available space, and mount point.");
+        appendCliLine("EXAMPLES");
+        appendCliLine("  df");
+        appendCliLine("  sd df");
         return true;
     }
     if (key == "ls" || key == "dir" || key == "sd ls") {
-        appendCliManEntry("sd ls", "ls [path] | sd ls [path]", "List files on the Tab5 microSD card.");
+        appendCliManEntry("sd ls", "ls [-lah] [path] | sd ls [-lah] [path]", "List files on the Tab5 microSD card.");
+        appendCliLine("Options: -l long format, -a show dotfiles, -h human-readable sizes.");
+        appendCliLine("EXAMPLES");
+        appendCliLine("  ls");
+        appendCliLine("  ls -lah /");
+        appendCliLine("  sd ls /scripts");
+        return true;
+    }
+    if (key == "chmod" || key == "sd chmod") {
+        appendCliManEntry("chmod", "chmod <mode> <path> | sd chmod <mode> <path>", "Set Tab5 virtual permission bits for SD files.");
+        appendCliLine("EXAMPLES");
+        appendCliLine("  chmod 644 /test.py");
+        appendCliLine("  chmod 755 /scripts");
         return true;
     }
     if (key == "cd" || key == "pwd" || key == "cat" || key == "sd cat") {
@@ -1428,9 +1714,31 @@ bool appendCliMan(const String& topic)
         appendCliLine("Examples: pwd, cd /scripts, cat boot.py");
         return true;
     }
-    if (key == "sd write" || key == "sd append" || key == "sd mkdir" || key == "sd rm") {
-        appendCliManEntry(key.c_str(), key.c_str(), "Create, append, make directories, or remove files on microSD.");
-        appendCliLine("Examples: sd write /hello.py print(123), sd append /notes.txt text");
+    if (key == "sd write" || key == "sd append") {
+        appendCliManEntry(key.c_str(), "sd write <path> <text> | sd append <path> <text>", "Write or append one line of text to a file on microSD.");
+        appendCliLine("EXAMPLES");
+        appendCliLine("  sd write /hello.py print(123)");
+        appendCliLine("  sd append /notes.txt more text");
+        return true;
+    }
+    if (key == "mkdir" || key == "sd mkdir") {
+        appendCliManEntry("mkdir", "mkdir <path> | sd mkdir <path>", "Create a directory on microSD.");
+        appendCliLine("EXAMPLES");
+        appendCliLine("  mkdir /scripts");
+        appendCliLine("  sd mkdir /logs");
+        return true;
+    }
+    if (key == "rmdir" || key == "sd rmdir") {
+        appendCliManEntry("rmdir", "rmdir <path> | sd rmdir <path>", "Remove an empty directory from microSD.");
+        appendCliLine("EXAMPLES");
+        appendCliLine("  rmdir /scripts");
+        appendCliLine("  sd rmdir /logs");
+        return true;
+    }
+    if (key == "rm" || key == "sd rm") {
+        appendCliManEntry("rm", "sd rm <path>", "Remove a file from microSD.");
+        appendCliLine("EXAMPLES");
+        appendCliLine("  sd rm /old.py");
         return true;
     }
     appendCliLine(String("No manual entry for ") + topic);
@@ -1486,6 +1794,21 @@ String normalizeSdPath(const String& input)
     return path;
 }
 
+void splitPythonScriptCommand(const String& rest, String& pathArg, String& args)
+{
+    String trimmed = rest;
+    trimmed.trim();
+    int split = trimmed.indexOf(' ');
+    if (split < 0) {
+        pathArg = trimmed;
+        args = "";
+        return;
+    }
+    pathArg = trimmed.substring(0, split);
+    args = trimmed.substring(split + 1);
+    args.trim();
+}
+
 bool ensureSdReady()
 {
     if (sdReady) {
@@ -1515,6 +1838,323 @@ String formatBytes(uint64_t bytes)
     return String(static_cast<double>(bytes) / (1024.0 * 1024.0), 1) + " MB";
 }
 
+String formatLsTime(time_t t)
+{
+    if (t <= 0) {
+        return "Jan  1  1980";
+    }
+    struct tm tmValue;
+    localtime_r(&t, &tmValue);
+    static const char* months[] = {"Jan", "Feb", "Mar", "Apr", "May", "Jun",
+                                   "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"};
+    char buf[16];
+    snprintf(buf, sizeof(buf), "%s %2d %02d:%02d",
+             months[constrain(tmValue.tm_mon, 0, 11)], tmValue.tm_mday,
+             tmValue.tm_hour, tmValue.tm_min);
+    return String(buf);
+}
+
+String joinSdPath(const String& dir, const String& name)
+{
+    if (dir == "/") {
+        return "/" + name;
+    }
+    return dir + "/" + name;
+}
+
+uint16_t defaultSdMode(bool directory)
+{
+    return directory ? 0755 : 0644;
+}
+
+int findSdModeIndex(const String& path)
+{
+    for (size_t i = 0; i < sdModes.size(); ++i) {
+        if (sdModes[i].path == path) {
+            return static_cast<int>(i);
+        }
+    }
+    return -1;
+}
+
+void loadSdModes()
+{
+    if (sdModesLoaded || !sdReady) {
+        return;
+    }
+    sdModesLoaded = true;
+    sdModes.clear();
+    File file = SD.open("/.tab5perms", FILE_READ);
+    if (!file) {
+        return;
+    }
+    String line;
+    while (file.available()) {
+        char c = static_cast<char>(file.read());
+        if (c == '\r') {
+            continue;
+        }
+        if (c != '\n') {
+            line += c;
+            continue;
+        }
+        int split = line.indexOf(' ');
+        if (split > 0) {
+            SdModeEntry entry;
+            entry.mode = static_cast<uint16_t>(strtoul(line.substring(0, split).c_str(), nullptr, 8) & 0777);
+            entry.path = line.substring(split + 1);
+            if (entry.path.length()) {
+                sdModes.push_back(entry);
+            }
+        }
+        line = "";
+    }
+    file.close();
+}
+
+void saveSdModes()
+{
+    if (!sdReady) {
+        return;
+    }
+    if (SD.exists("/.tab5perms")) {
+        SD.remove("/.tab5perms");
+    }
+    File file = SD.open("/.tab5perms", FILE_APPEND);
+    if (!file) {
+        return;
+    }
+    char modeText[8];
+    for (const auto& entry : sdModes) {
+        snprintf(modeText, sizeof(modeText), "%03o", entry.mode & 0777);
+        file.print(modeText);
+        file.print(" ");
+        file.print(entry.path);
+        file.print("\n");
+    }
+    file.close();
+}
+
+uint16_t sdModeForPath(const String& path, bool directory)
+{
+    loadSdModes();
+    int index = findSdModeIndex(path);
+    return index >= 0 ? sdModes[index].mode : defaultSdMode(directory);
+}
+
+String modeString(uint16_t mode, bool directory)
+{
+    String out = directory ? "d" : "-";
+    const uint16_t bits[] = {0400, 0200, 0100, 0040, 0020, 0010, 0004, 0002, 0001};
+    const char chars[] = {'r', 'w', 'x', 'r', 'w', 'x', 'r', 'w', 'x'};
+    for (size_t i = 0; i < 9; ++i) {
+        out += (mode & bits[i]) ? chars[i] : '-';
+    }
+    return out;
+}
+
+bool parseOctalMode(const String& text, uint16_t& mode)
+{
+    if (!text.length() || text.length() > 4) {
+        return false;
+    }
+    uint16_t value = 0;
+    for (size_t i = 0; i < text.length(); ++i) {
+        char c = text[i];
+        if (c < '0' || c > '7') {
+            return false;
+        }
+        value = static_cast<uint16_t>((value << 3) + (c - '0'));
+    }
+    mode = value & 0777;
+    return true;
+}
+
+void setSdModeForPath(const String& path, uint16_t mode)
+{
+    loadSdModes();
+    int index = findSdModeIndex(path);
+    if (index >= 0) {
+        sdModes[index].mode = mode;
+    } else {
+        sdModes.push_back({path, mode});
+    }
+    saveSdModes();
+}
+
+bool sdPathHasWritePermission(const String& path)
+{
+    File file = SD.open(path, FILE_READ);
+    bool directory = file && file.isDirectory();
+    if (file) {
+        file.close();
+    }
+    return (sdModeForPath(path, directory) & 0200) != 0;
+}
+
+bool sdPathHasExecutePermission(const String& path)
+{
+    return (sdModeForPath(path, true) & 0100) != 0;
+}
+
+bool sdPathHasReadPermission(const String& path)
+{
+    File file = SD.open(path, FILE_READ);
+    bool directory = file && file.isDirectory();
+    if (file) {
+        file.close();
+    }
+    return (sdModeForPath(path, directory) & 0400) != 0;
+}
+
+bool parseLsOptions(const String& input, LsOptions& options, String& error)
+{
+    options = LsOptions{};
+    error = "";
+    String rest = input;
+    rest.trim();
+    while (rest.length()) {
+        int split = rest.indexOf(' ');
+        String token = split < 0 ? rest : rest.substring(0, split);
+        rest = split < 0 ? "" : rest.substring(split + 1);
+        rest.trim();
+        if (!token.length()) {
+            continue;
+        }
+        if (token == "--") {
+            if (rest.length()) {
+                if (options.path.length()) {
+                    error = "ls: multiple paths are not supported";
+                    return false;
+                }
+                options.path = rest;
+            }
+            break;
+        }
+        if (token.length() > 1 && token[0] == '-') {
+            for (size_t i = 1; i < token.length(); ++i) {
+                char opt = token[i];
+                if (opt == 'l') {
+                    options.longFormat = true;
+                } else if (opt == 'a') {
+                    options.all = true;
+                } else if (opt == 'h') {
+                    options.human = true;
+                } else {
+                    error = String("ls: unsupported option -- ") + opt;
+                    return false;
+                }
+            }
+            continue;
+        }
+        if (options.path.length()) {
+            error = "ls: multiple paths are not supported";
+            return false;
+        }
+        options.path = token;
+    }
+    return true;
+}
+
+String basenameOnly(const String& path);
+
+String lsDisplayLine(File& file, const String& name, const String& path, const LsOptions& options)
+{
+    if (!options.longFormat) {
+        return name + (file.isDirectory() ? "/" : "");
+    }
+    char sizeText[16];
+    if (options.human) {
+        snprintf(sizeText, sizeof(sizeText), "%8s", formatBytes(file.isDirectory() ? 0 : file.size()).c_str());
+    } else {
+        snprintf(sizeText, sizeof(sizeText), "%8u", static_cast<unsigned>(file.isDirectory() ? 0 : file.size()));
+    }
+    return modeString(sdModeForPath(path, file.isDirectory()), file.isDirectory()) +
+           " 1 tab5 tab5 " + sizeText + " " + formatLsTime(file.getLastWrite()) + " " +
+           name + (file.isDirectory() ? "/" : "");
+}
+
+void sortLsNames(std::vector<String>& names)
+{
+    std::sort(names.begin(), names.end(), [](const String& a, const String& b) {
+        return strcmp(a.c_str(), b.c_str()) < 0;
+    });
+}
+
+std::vector<String> collectLsNames(File& root, const String& path, const LsOptions& options)
+{
+    std::vector<String> names;
+    File file = root.openNextFile();
+    while (file) {
+        String displayName = basenameOnly(file.name());
+        if (options.all || !displayName.startsWith(".")) {
+            names.push_back(displayName + (file.isDirectory() ? "/" : ""));
+        }
+        file = root.openNextFile();
+    }
+    sortLsNames(names);
+    return names;
+}
+
+String lsColumnLine(const std::vector<String>& names, size_t first, size_t rowCount, size_t columnWidth, size_t columns)
+{
+    String line;
+    for (size_t col = 0; col < columns; ++col) {
+        size_t index = first + col * rowCount;
+        if (index >= names.size()) {
+            continue;
+        }
+        String name = names[index];
+        line += name;
+        if (col + 1 < columns) {
+            size_t pad = columnWidth > name.length() ? columnWidth - name.length() : 2;
+            while (pad--) {
+                line += ' ';
+            }
+        }
+    }
+    while (line.endsWith(" ")) {
+        line.remove(line.length() - 1);
+    }
+    return line;
+}
+
+void appendLsColumns(const std::vector<String>& names, size_t terminalWidth)
+{
+    if (names.empty()) {
+        return;
+    }
+    size_t maxLen = 0;
+    for (const String& name : names) {
+        maxLen = std::max(maxLen, name.length());
+    }
+    size_t columnWidth = maxLen + 2;
+    size_t columns = std::max<size_t>(1, terminalWidth / columnWidth);
+    columns = std::min(columns, names.size());
+    size_t rows = (names.size() + columns - 1) / columns;
+    for (size_t row = 0; row < rows; ++row) {
+        appendCliLine(lsColumnLine(names, row, rows, columnWidth, columns));
+    }
+}
+
+void serialPrintLsColumns(const std::vector<String>& names, size_t terminalWidth)
+{
+    if (names.empty()) {
+        return;
+    }
+    size_t maxLen = 0;
+    for (const String& name : names) {
+        maxLen = std::max(maxLen, name.length());
+    }
+    size_t columnWidth = maxLen + 2;
+    size_t columns = std::max<size_t>(1, terminalWidth / columnWidth);
+    columns = std::min(columns, names.size());
+    size_t rows = (names.size() + columns - 1) / columns;
+    for (size_t row = 0; row < rows; ++row) {
+        Serial.println(lsColumnLine(names, row, rows, columnWidth, columns));
+    }
+}
+
 void appendSdStatus()
 {
     if (!ensureSdReady()) {
@@ -1526,11 +2166,31 @@ void appendSdStatus()
     if (type == CARD_MMC) typeName = "MMC";
     else if (type == CARD_SD) typeName = "SDSC";
     else if (type == CARD_SDHC) typeName = "SDHC";
+    uint64_t total = SD.totalBytes();
+    uint64_t used = SD.usedBytes();
+    uint64_t avail = total > used ? total - used : 0;
     appendCliLine(String("sd=ready type=") + typeName +
-                  " size=" + formatBytes(SD.cardSize()) +
-                  " used=" + formatBytes(SD.usedBytes()) +
-                  " total=" + formatBytes(SD.totalBytes()));
+                  " card=" + formatBytes(SD.cardSize()) +
+                  " size=" + formatBytes(total) +
+                  " used=" + formatBytes(used) +
+                  " avail=" + formatBytes(avail));
     appendCliLine(String("cwd=") + sdCwd);
+}
+
+void appendSdDf()
+{
+    if (!ensureSdReady()) {
+        appendCliLine(String("sd: ") + sdLastError);
+        return;
+    }
+    uint64_t total = SD.totalBytes();
+    uint64_t used = SD.usedBytes();
+    uint64_t avail = total > used ? total - used : 0;
+    uint32_t usePct = total ? static_cast<uint32_t>((used * 100ULL + total - 1) / total) : 0;
+    appendCliLine("Filesystem      Size  Used Avail Use% Mounted on");
+    appendCliLine(String("microSD         ") + formatBytes(total) + "  " +
+                  formatBytes(used) + "  " + formatBytes(avail) + "  " +
+                  usePct + "% /sd");
 }
 
 void appendSdList(const String& inputPath)
@@ -1539,26 +2199,46 @@ void appendSdList(const String& inputPath)
         appendCliLine(String("sd: ") + sdLastError);
         return;
     }
-    String path = normalizeSdPath(inputPath);
+    LsOptions options;
+    String error;
+    if (!parseLsOptions(inputPath, options, error)) {
+        appendCliLine(error);
+        return;
+    }
+    String path = normalizeSdPath(options.path);
     File root = SD.open(path, FILE_READ);
     if (!root) {
         appendCliLine(String("sd ls: cannot open ") + path);
         return;
     }
-    if (!root.isDirectory()) {
-        appendCliLine(formatBytes(root.size()) + " " + path);
+    if (root.isDirectory() && !sdPathHasExecutePermission(path)) {
+        appendCliLine(String("ls: cannot open directory '") + path + "': Permission denied");
         root.close();
         return;
     }
-    appendCliLine(String("sd: ") + path);
+    if (!root.isDirectory()) {
+        appendCliLine(lsDisplayLine(root, basenameOnly(path), path, options));
+        root.close();
+        return;
+    }
+    if (!options.longFormat) {
+        std::vector<String> names = collectLsNames(root, path, options);
+        appendLsColumns(names, std::max<size_t>(20, vt.columns()));
+        root.close();
+        return;
+    }
+    if (options.longFormat) {
+        appendCliLine(String("total ") + formatBytes(root.size()) + "  " + path);
+    }
     File file = root.openNextFile();
     while (file) {
         String name = file.name();
-        if (file.isDirectory()) {
-            appendCliLine(String("  <DIR>      ") + name + "/");
-        } else {
-            appendCliLine(String("  ") + formatBytes(file.size()) + "  " + name);
+        String displayName = basenameOnly(name);
+        if (!options.all && displayName.startsWith(".")) {
+            file = root.openNextFile();
+            continue;
         }
+        appendCliLine(lsDisplayLine(file, displayName, joinSdPath(path, displayName), options));
         file = root.openNextFile();
     }
     root.close();
@@ -1571,6 +2251,10 @@ void appendSdCat(const String& inputPath)
         return;
     }
     String path = normalizeSdPath(inputPath);
+    if (!sdPathHasReadPermission(path)) {
+        appendCliLine(String("sd cat: permission denied: ") + path);
+        return;
+    }
     File file = SD.open(path, FILE_READ);
     if (!file || file.isDirectory()) {
         appendCliLine(String("sd cat: cannot open ") + path);
@@ -1604,6 +2288,200 @@ void appendSdCat(const String& inputPath)
     file.close();
 }
 
+String basenameOnly(const String& path)
+{
+    int slash = path.lastIndexOf('/');
+    return slash >= 0 ? path.substring(slash + 1) : path;
+}
+
+String parentSdPath(const String& path)
+{
+    if (path == "/" || !path.length()) {
+        return "/";
+    }
+    int slash = path.lastIndexOf('/');
+    if (slash <= 0) {
+        return "/";
+    }
+    return path.substring(0, slash);
+}
+
+bool makeSdDirectory(const String& inputPath, String& message)
+{
+    if (!ensureSdReady()) {
+        message = String("sd: ") + sdLastError;
+        return false;
+    }
+    String path = normalizeSdPath(inputPath);
+    if (path == "/") {
+        message = "mkdir: cannot create directory '/': File exists";
+        return false;
+    }
+    if (SD.exists(path)) {
+        message = String("mkdir: cannot create directory '") + path + "': File exists";
+        return false;
+    }
+    String parent = parentSdPath(path);
+    if (!sdPathHasWritePermission(parent) || !sdPathHasExecutePermission(parent)) {
+        message = String("mkdir: cannot create directory '") + path + "': Permission denied";
+        return false;
+    }
+    if (!SD.mkdir(path)) {
+        message = String("mkdir: cannot create directory '") + path + "': failed";
+        return false;
+    }
+    message = String("created ") + path;
+    return true;
+}
+
+bool removeSdDirectory(const String& inputPath, String& message)
+{
+    if (!ensureSdReady()) {
+        message = String("sd: ") + sdLastError;
+        return false;
+    }
+    String path = normalizeSdPath(inputPath);
+    if (path == "/") {
+        message = "rmdir: failed to remove '/': Invalid argument";
+        return false;
+    }
+    File dir = SD.open(path, FILE_READ);
+    if (!dir || !dir.isDirectory()) {
+        if (dir) {
+            dir.close();
+        }
+        message = String("rmdir: failed to remove '") + path + "': Not a directory";
+        return false;
+    }
+    File child = dir.openNextFile();
+    if (child) {
+        child.close();
+        dir.close();
+        message = String("rmdir: failed to remove '") + path + "': Directory not empty";
+        return false;
+    }
+    dir.close();
+    String parent = parentSdPath(path);
+    if (!sdPathHasWritePermission(parent) || !sdPathHasExecutePermission(parent)) {
+        message = String("rmdir: failed to remove '") + path + "': Permission denied";
+        return false;
+    }
+    if (!SD.rmdir(path)) {
+        message = String("rmdir: failed to remove '") + path + "'";
+        return false;
+    }
+    int modeIndex = findSdModeIndex(path);
+    if (modeIndex >= 0) {
+        sdModes.erase(sdModes.begin() + modeIndex);
+        saveSdModes();
+    }
+    message = String("removed directory ") + path;
+    return true;
+}
+
+String commonPrefix(const std::vector<String>& values)
+{
+    if (values.empty()) {
+        return "";
+    }
+    String prefix = values[0];
+    for (size_t i = 1; i < values.size(); ++i) {
+        while (prefix.length() && !values[i].startsWith(prefix)) {
+            prefix.remove(prefix.length() - 1);
+        }
+    }
+    return prefix;
+}
+
+bool commandAllowsPathCompletion(const String& beforeToken)
+{
+    if (pythonReplMode) {
+        return false;
+    }
+    String text = beforeToken;
+    text.trim();
+    text.toLowerCase();
+    if (!text.length()) {
+        return false;
+    }
+    int firstSpace = text.indexOf(' ');
+    String first = firstSpace >= 0 ? text.substring(0, firstSpace) : text;
+    if (first == "chmod" || first == "python" || first == "cat" || first == "cd" ||
+        first == "ls" || first == "dir" || first == "mkdir" || first == "rmdir") {
+        return true;
+    }
+    if (text.startsWith("sd chmod ")) {
+        return true;
+    }
+    return text == "ls" || text == "dir" || text == "cat" || text == "cd" || text == "python" ||
+           text == "chmod" || text == "mkdir" || text == "rmdir" || text.endsWith(" chmod") ||
+           text == "sd ls" || text == "sd dir" || text == "sd cat" || text == "sd cd" ||
+           text == "sd rm" || text == "sd mkdir" || text == "sd rmdir" || text == "scp put";
+}
+
+bool completeSdPathAtCursor()
+{
+    if (!ensureSdReady()) {
+        appendCliLine(String("sd: ") + sdLastError);
+        return true;
+    }
+    clampCommandCursor();
+    String before = commandLine.substring(0, commandCursor);
+    int tokenStart = before.lastIndexOf(' ');
+    String beforeToken = tokenStart >= 0 ? before.substring(0, tokenStart) : "";
+    String token = tokenStart >= 0 ? before.substring(tokenStart + 1) : before;
+    if (!commandAllowsPathCompletion(beforeToken)) {
+        return false;
+    }
+
+    int slash = token.lastIndexOf('/');
+    String dirPart = slash >= 0 ? token.substring(0, slash + 1) : "";
+    String prefix = slash >= 0 ? token.substring(slash + 1) : token;
+    String dirPath = dirPart.length() ? normalizeSdPath(dirPart) : sdCwd;
+    File dir = SD.open(dirPath, FILE_READ);
+    if (!dir || !dir.isDirectory()) {
+        appendCliLine(String("complete: not a directory: ") + dirPath);
+        return true;
+    }
+
+    std::vector<String> matches;
+    File file = dir.openNextFile();
+    while (file) {
+        String name = basenameOnly(file.name());
+        if (name.startsWith(prefix)) {
+            matches.push_back(name + (file.isDirectory() ? "/" : ""));
+        }
+        file = dir.openNextFile();
+    }
+    dir.close();
+
+    if (matches.empty()) {
+        appendCliLine("complete: no match");
+        return true;
+    }
+
+    String replacementSuffix;
+    if (matches.size() == 1) {
+        replacementSuffix = matches[0];
+    } else {
+        replacementSuffix = commonPrefix(matches);
+        appendCliLine("");
+        for (const auto& match : matches) {
+            appendCliLine(match);
+        }
+    }
+    if (replacementSuffix.length() > prefix.length()) {
+        String replacement = dirPart + replacementSuffix;
+        size_t start = tokenStart >= 0 ? static_cast<size_t>(tokenStart + 1) : 0;
+        commandLine = commandLine.substring(0, start) + replacement + commandLine.substring(commandCursor);
+        commandCursor = start + replacement.length();
+    }
+    cursorVisible = true;
+    lastCursorBlink = millis();
+    dirty = true;
+    return true;
+}
+
 bool writeSdText(const String& inputPath, const String& text, bool append)
 {
     if (!ensureSdReady()) {
@@ -1611,6 +2489,10 @@ bool writeSdText(const String& inputPath, const String& text, bool append)
         return false;
     }
     String path = normalizeSdPath(inputPath);
+    if (SD.exists(path) && !sdPathHasWritePermission(path)) {
+        appendCliLine(String("sd write: permission denied: ") + path);
+        return false;
+    }
     if (!append && SD.exists(path)) {
         SD.remove(path);
     }
@@ -1630,6 +2512,10 @@ bool handleSdCliCommand(const String& command, const String& lower)
 {
     if (lower == "sd" || lower == "sd status") {
         appendSdStatus();
+        return true;
+    }
+    if (lower == "df" || lower == "sd df" || lower == "sd free" || lower == "free") {
+        appendSdDf();
         return true;
     }
     if (lower == "pwd" || lower == "sd pwd") {
@@ -1658,6 +2544,8 @@ bool handleSdCliCommand(const String& command, const String& lower)
         File dir = SD.open(path, FILE_READ);
         if (!dir || !dir.isDirectory()) {
             appendCliLine(String("sd cd: not a directory: ") + path);
+        } else if (!sdPathHasExecutePermission(path)) {
+            appendCliLine(String("sd cd: permission denied: ") + path);
         } else {
             sdCwd = path;
             appendCliLine(sdCwd);
@@ -1681,13 +2569,16 @@ bool handleSdCliCommand(const String& command, const String& lower)
         writeSdText(rest.substring(0, split), rest.substring(split + 1), append);
         return true;
     }
-    if (lower.startsWith("sd mkdir ")) {
-        if (!ensureSdReady()) {
-            appendCliLine(String("sd: ") + sdLastError);
-            return true;
-        }
-        String path = normalizeSdPath(command.substring(strlen("sd mkdir ")));
-        appendCliLine(SD.mkdir(path) ? String("created ") + path : String("sd mkdir failed: ") + path);
+    if (lower.startsWith("mkdir ") || lower.startsWith("sd mkdir ")) {
+        String message;
+        makeSdDirectory(lower.startsWith("sd mkdir ") ? command.substring(strlen("sd mkdir ")) : command.substring(strlen("mkdir ")), message);
+        appendCliLine(message);
+        return true;
+    }
+    if (lower.startsWith("rmdir ") || lower.startsWith("sd rmdir ")) {
+        String message;
+        removeSdDirectory(lower.startsWith("sd rmdir ") ? command.substring(strlen("sd rmdir ")) : command.substring(strlen("rmdir ")), message);
+        appendCliLine(message);
         return true;
     }
     if (lower.startsWith("sd rm ")) {
@@ -1696,7 +2587,38 @@ bool handleSdCliCommand(const String& command, const String& lower)
             return true;
         }
         String path = normalizeSdPath(command.substring(strlen("sd rm ")));
+        if (SD.exists(path) && !sdPathHasWritePermission(path)) {
+            appendCliLine(String("sd rm: permission denied: ") + path);
+            return true;
+        }
         appendCliLine(SD.remove(path) ? String("removed ") + path : String("sd rm failed: ") + path);
+        return true;
+    }
+    if (lower.startsWith("chmod ") || lower.startsWith("sd chmod ")) {
+        String rest = lower.startsWith("sd chmod ") ? command.substring(strlen("sd chmod ")) : command.substring(strlen("chmod "));
+        rest.trim();
+        int split = rest.indexOf(' ');
+        if (split <= 0) {
+            appendCliLine("chmod: usage: chmod <mode> <path>");
+            return true;
+        }
+        String modeText = rest.substring(0, split);
+        String path = normalizeSdPath(rest.substring(split + 1));
+        if (!ensureSdReady()) {
+            appendCliLine(String("sd: ") + sdLastError);
+            return true;
+        }
+        if (!SD.exists(path)) {
+            appendCliLine(String("chmod: cannot access '") + path + "'");
+            return true;
+        }
+        uint16_t mode = 0;
+        if (!parseOctalMode(modeText, mode)) {
+            appendCliLine("chmod: invalid mode");
+            return true;
+        }
+        setSdModeForPath(path, mode);
+        appendCliLine(String("mode ") + modeText + " " + path);
         return true;
     }
     return false;
@@ -1884,7 +2806,7 @@ bool handlePythonCliCommand(const String& command, const String& lower)
     if (lower == "python help" || lower == "python --help" || lower == "python -h") {
         appendCliLine("python commands:");
         appendCliLine("  python");
-        appendCliLine("  python <sd.py>");
+        appendCliLine("  python <sd.py> [args...]");
         appendCliLine("  python -c <statement>");
         appendCliLine("  python --reset");
         appendCliLine("Runs the embedded MicroPython VM; scripts are loaded from microSD.");
@@ -1912,12 +2834,17 @@ bool handlePythonCliCommand(const String& command, const String& lower)
             appendCliLine(String("sd: ") + sdLastError);
             return true;
         }
-        String pathArg = command.substring(strlen("python "));
-        pathArg.trim();
+        String pathArg;
+        String args;
+        splitPythonScriptCommand(command.substring(strlen("python ")), pathArg, args);
         String path = normalizeSdPath(pathArg);
-        appendCliLine(String("python ") + path);
+        if (!sdPathHasReadPermission(path)) {
+            appendCliLine(String("python: permission denied: ") + path);
+            return true;
+        }
+        appendCliLine(args.length() ? String("python ") + path + " " + args : String("python ") + path);
         uint32_t start = millis();
-        bool ok = python.runFile(SD, path, appendPythonCliLine);
+        bool ok = python.runFile(SD, path, args, appendPythonCliLine);
         appendCliLine(ok ? String("python: done in ") + (millis() - start) + " ms"
                          : String("python: failed: ") + python.lastError());
         return true;
@@ -2063,6 +2990,16 @@ bool handleTab5CliCommand(const String& line)
     if (lower == "wifi status") {
         appendCliLine(wifiStatusText);
         appendCliLine(String("wl=") + static_cast<int>(WiFi.status()) + " ip=" + WiFi.localIP().toString() + " ssid=" + WiFi.SSID());
+        return true;
+    }
+    if (lower == "wifi off") {
+        stopWifiRuntime();
+        appendCliLine("Wi-Fi off");
+        return true;
+    }
+    if (lower == "wifi on") {
+        enableWifiRuntime(20000);
+        appendCliLine("Wi-Fi on");
         return true;
     }
     if (lower == "wifi list") {
@@ -2304,7 +3241,9 @@ void drawHeader()
 
     screenSprite.setTextColor(TFT_WHITE, TFT_DARKGREY);
     String wifiStateText = "WiFi down";
-    if (WiFi.status() == WL_CONNECTED) {
+    if (wifiDisabled) {
+        wifiStateText = "WiFi off";
+    } else if (WiFi.status() == WL_CONNECTED) {
         wifiStateText = "WiFi ok";
     } else if (wifiState == WifiConnectState::Connecting) {
         wifiStateText = "WiFi conn";
@@ -2401,6 +3340,33 @@ void setWifiFailureStatus(const String& prefix)
     appendWifiProgress(wifiLastFailureText);
 }
 
+void stopWifiRuntime()
+{
+    wifiDisabled = true;
+    wifiState = WifiConnectState::Idle;
+    wifiRetryAt = 0;
+    wifiLastRetrySecond = -1;
+    wifiDirectBeginPending = false;
+    wifiWorkerDone = false;
+    wifiWorkerSsid = "";
+    wifiWorkerPassword = "";
+    WiFi.scanDelete();
+    wifiScanActive = false;
+    if (WiFi.status() == WL_CONNECTED) {
+        WiFi.disconnect(true, false);
+    }
+    setWifiStatus("Wi-Fi off");
+    appendWifiProgress("Wi-Fi off");
+}
+
+void enableWifiRuntime(uint32_t timeoutMs)
+{
+    wifiDisabled = false;
+    setWifiStatus("Wi-Fi on");
+    appendWifiProgress("Wi-Fi on");
+    startWifiReconnect(timeoutMs);
+}
+
 void handleWifiEvent(arduino_event_id_t event, arduino_event_info_t info)
 {
     if (event != ARDUINO_EVENT_WIFI_STA_DISCONNECTED) {
@@ -2428,12 +3394,20 @@ void configureTab5WifiPins()
 
 void wifiBeginTask(void*)
 {
+    if (wifiDisabled) {
+        wifiWorkerDone = true;
+        wifiWorkerBusy = false;
+        vTaskDelete(nullptr);
+        return;
+    }
     configureTab5WifiPins();
     WiFi.mode(WIFI_STA);
     WiFi.setSleep(false);
     WiFi.disconnect(false);
     delay(20);
-    WiFi.begin(wifiWorkerSsid.c_str(), wifiWorkerPassword.c_str());
+    if (!wifiDisabled && wifiWorkerSsid.length()) {
+        WiFi.begin(wifiWorkerSsid.c_str(), wifiWorkerPassword.c_str());
+    }
     wifiWorkerDone = true;
     wifiWorkerBusy = false;
     vTaskDelete(nullptr);
@@ -2441,17 +3415,26 @@ void wifiBeginTask(void*)
 
 void beginWifiNow(const String& ssid, const String& password)
 {
+    if (wifiDisabled) {
+        wifiWorkerDone = true;
+        return;
+    }
     configureTab5WifiPins();
     WiFi.mode(WIFI_STA);
     WiFi.setSleep(false);
     WiFi.disconnect(false);
     delay(20);
-    WiFi.begin(ssid.c_str(), password.c_str());
+    if (!wifiDisabled) {
+        WiFi.begin(ssid.c_str(), password.c_str());
+    }
     wifiWorkerDone = true;
 }
 
 bool startWifiBeginWorker(const String& ssid, const String& password)
 {
+    if (wifiDisabled) {
+        return false;
+    }
     if (ForceFixedWifiForTest) {
         wifiWorkerSsid = ssid;
         wifiWorkerPassword = password;
@@ -2499,6 +3482,12 @@ void adjustTerminalLineStep(int delta)
 void beginWifiAttempt(size_t index)
 {
     wifiLastRetrySecond = -1;
+    if (wifiDisabled) {
+        wifiState = WifiConnectState::Idle;
+        wifiRetryAt = 0;
+        setWifiStatus("Wi-Fi off");
+        return;
+    }
     if (!ForceFixedWifiForTest && index >= config.wifi.size()) {
         wifiState = WifiConnectState::Failed;
         wifiRetryAt = millis() + 10000;
@@ -2525,10 +3514,17 @@ void beginWifiAttempt(size_t index)
     setWifiStatus(String("Wi-Fi direct: ") + ssid + " p" + password.length());
 }
 
-void startWifiReconnect(uint32_t timeoutMs = 20000)
+void startWifiReconnect(uint32_t timeoutMs)
 {
     wifiAttemptTimeoutMs = timeoutMs;
     wifiLastRetrySecond = -1;
+    if (wifiDisabled) {
+        wifiState = WifiConnectState::Idle;
+        wifiRetryAt = 0;
+        setWifiStatus("Wi-Fi off");
+        appendWifiProgress("Wi-Fi off");
+        return;
+    }
     if (!ForceFixedWifiForTest && config.wifi.empty()) {
         wifiState = WifiConnectState::Failed;
         wifiRetryAt = 0;
@@ -2546,6 +3542,12 @@ void startWifiReconnect(uint32_t timeoutMs = 20000)
 
 void pollWifi()
 {
+    if (wifiDisabled) {
+        if (WiFi.status() == WL_CONNECTED) {
+            WiFi.disconnect(true, false);
+        }
+        return;
+    }
     if (wifiScanActive) {
         return;
     }
@@ -2986,20 +3988,20 @@ void drawTerminal()
 void drawWifiList()
 {
     clampSettingScroll(config.wifi.size());
+    drawSettingsTitle("Wi-Fi profiles");
     setSettingsFontForLine();
     screenSprite.setTextColor(TFT_GREEN, TFT_BLACK);
     drawFocusedBodyButton(BodyBtn1, "SCAN", 0);
     drawFocusedBodyButton(BodyBtn2, "ADD", 1);
     drawFocusedBodyButton(BodyBtn3, "CONNECT", 2, TFT_DARKGREEN);
-    screenSprite.setTextColor(TFT_GREEN, TFT_BLACK);
-    screenSprite.drawString("Wi-Fi profiles", 428, HeaderH + 28);
+    drawFocusedBodyButton(BodyBtn4, wifiDisabled ? "ON" : "OFF", 3, wifiDisabled ? TFT_DARKGREEN : TFT_MAROON);
     for (size_t row = 0; row < visibleSettingRows(); ++row) {
         size_t i = settingScrollOffset + row;
         if (i >= config.wifi.size()) {
             break;
         }
         int y = settingListTop() + static_cast<int>(row) * settingRowH();
-        bool selected = !keyboardMenuMode && focusedContentItem == i + 3;
+        bool selected = !keyboardMenuMode && focusedContentItem == i + 4;
         uint16_t bg = selected ? TFT_NAVY : TFT_BLACK;
         screenSprite.fillRect(4, y, screenSprite.width() - 8, settingRowH() - 4, bg);
         screenSprite.drawRect(4, y, screenSprite.width() - 8, settingRowH() - 4, selected ? TFT_CYAN : TFT_DARKGREY);
@@ -3016,13 +4018,14 @@ void drawWifiList()
 void drawWifiScan()
 {
     clampSettingScroll(scannedNetworks.size());
+    drawSettingsTitle("Wi-Fi scan");
     setSettingsFontForLine();
     screenSprite.setTextColor(TFT_GREEN, TFT_BLACK);
     drawFocusedBodyButton(BodyBtn1, "RESCAN", 0);
     drawFocusedBodyButton(BodyBtn2, "BACK", 1);
     screenSprite.setTextColor(TFT_GREEN, TFT_BLACK);
     String title = wifiScanActive ? "Wi-Fi Scan: running..." : String("Wi-Fi Scan: ") + scannedNetworks.size() + " SSIDs";
-    screenSprite.drawString(title, 240, HeaderH + 18);
+    screenSprite.drawString(title, 256, HeaderH + 8);
     for (size_t row = 0; row < visibleSettingRows(); ++row) {
         size_t i = settingScrollOffset + row;
         if (i >= scannedNetworks.size()) {
@@ -3044,13 +4047,12 @@ void drawWifiScan()
 void drawSshList()
 {
     clampSettingScroll(config.ssh.size());
+    drawSettingsTitle("SSH profiles");
     setSettingsFontForLine();
     screenSprite.setTextColor(TFT_GREEN, TFT_BLACK);
     drawFocusedBodyButton(BodyBtn1, "ADD", 0);
     drawFocusedBodyButton(BodyBtn2, "EDIT", 1);
     drawFocusedBodyButton(BodyBtn3, "CONNECT", 2, TFT_DARKGREEN);
-    screenSprite.setTextColor(TFT_GREEN, TFT_BLACK);
-    screenSprite.drawString("SSH profiles", 428, HeaderH + 28);
     for (size_t row = 0; row < visibleSettingRows(); ++row) {
         size_t i = settingScrollOffset + row;
         if (i >= config.ssh.size()) {
@@ -3074,9 +4076,7 @@ void drawSshList()
 
 void drawEditFields(const char* title, const char* const* labels, uint8_t count, bool sshFields)
 {
-    setSettingsFontForLine();
-    screenSprite.setTextColor(TFT_GREEN, TFT_BLACK);
-    screenSprite.drawString(title, 8, HeaderH + 8);
+    drawSettingsTitle(title);
     for (uint8_t i = 0; i < count; ++i) {
         int y = settingListTop() + i * settingRowH();
         uint16_t bg = i == editField ? TFT_NAVY : TFT_BLACK;
@@ -3130,6 +4130,7 @@ void drawEditFields(const char* title, const char* const* labels, uint8_t count,
 
 void drawFontList()
 {
+    drawSettingsTitle("Font settings");
     setSettingsFontForLine();
     screenSprite.setTextColor(TFT_GREEN, TFT_BLACK);
     drawFocusedBodyButton(FontMinusBtn, "-", 0);
@@ -3266,6 +4267,12 @@ bool scannedSsidExists(const String& ssid)
 
 void scanWifiNetworks()
 {
+    if (wifiDisabled) {
+        setWifiStatus("Wi-Fi off");
+        appendStatus("Wi-Fi is off; press ON first");
+        dirty = true;
+        return;
+    }
     if (wifiScanActive) {
         setWifiStatus("Wi-Fi scan running");
         dirty = true;
@@ -3549,6 +4556,14 @@ void handleListTouch(int x, int y)
             focusedContentItem = 2;
             saveConfig();
             startWifiReconnect(20000);
+        } else if (BodyBtn4.contains(x, y)) {
+            focusedContentItem = 3;
+            if (wifiDisabled) {
+                enableWifiRuntime(20000);
+            } else {
+                stopWifiRuntime();
+            }
+            dirty = true;
         }
         return;
     }
@@ -3622,7 +4637,7 @@ void handleListTouch(int x, int y)
             appendStatus(String("Active Wi-Fi: ") + config.wifi[activeWifi].name);
             saveConfig();
         } else {
-            focusedContentItem = index + 3;
+            focusedContentItem = index + 4;
             activeWifi = index;
             appendStatus(String("Active Wi-Fi: ") + config.wifi[activeWifi].name);
             saveConfig();
@@ -3662,10 +4677,10 @@ void editFocusedSshProfile()
 
 void selectFocusedWifiProfile()
 {
-    if (focusedContentItem < 3) {
+    if (focusedContentItem < 4) {
         return;
     }
-    size_t index = focusedContentItem - 3;
+    size_t index = focusedContentItem - 4;
     if (index < config.wifi.size()) {
         activeWifi = index;
         appendStatus(String("Active Wi-Fi: ") + config.wifi[activeWifi].name);
@@ -3853,7 +4868,7 @@ void moveEditField(int delta)
 size_t wifiContentCount()
 {
     if (screen == Screen::WifiList) {
-        return 3 + config.wifi.size();
+        return 4 + config.wifi.size();
     }
     if (screen == Screen::WifiScan) {
         return 2 + scannedNetworks.size();
@@ -3881,7 +4896,7 @@ void clampWifiContentFocus()
 
 void ensureWifiFocusedRowVisible()
 {
-    size_t firstRowFocus = screen == Screen::WifiScan ? 2 : 3;
+    size_t firstRowFocus = screen == Screen::WifiList ? 4 : (screen == Screen::WifiScan ? 2 : 3);
     if (focusedContentItem < firstRowFocus) {
         return;
     }
@@ -3922,6 +4937,13 @@ void executeWifiContentFocus()
         } else if (focusedContentItem == 2) {
             saveConfig();
             startWifiReconnect(20000);
+        } else if (focusedContentItem == 3) {
+            if (wifiDisabled) {
+                enableWifiRuntime(20000);
+            } else {
+                stopWifiRuntime();
+            }
+            dirty = true;
         } else {
             selectFocusedWifiProfile();
         }
@@ -4024,6 +5046,9 @@ void handleDisconnectedTerminalText(const KeyAction& action)
         return;
     }
     if (isTabKey(action)) {
+        if (completeSdPathAtCursor()) {
+            return;
+        }
         return;
     }
 
@@ -4230,11 +5255,17 @@ void serialPrintHelp()
     Serial.println("  status");
     Serial.println("  crash");
     Serial.println("  sd status");
-    Serial.println("  sd ls [path]");
+    Serial.println("  sd df");
+    Serial.println("  sd ls [-lah] [path]");
     Serial.println("  sd cat <path>");
+    Serial.println("  sd mkdir <path>");
+    Serial.println("  sd rmdir <path>");
     Serial.println("  sd write <path> <text>");
     Serial.println("  sd append <path> <text>");
+    Serial.println("  sd chmod <mode> <path>");
     Serial.println("  wifi status");
+    Serial.println("  wifi off");
+    Serial.println("  wifi on");
     Serial.println("  ssh list");
     Serial.println("  ssh active <index>");
     Serial.println("  ssh connect [index]");
@@ -4247,7 +5278,7 @@ void serialPrintHelp()
     Serial.println("  scp put <sd-local> user@host:/remote [password]");
     Serial.println("  ble status|enable|disable|scan|pair <index>|forget");
     Serial.println("  python -c <statement>");
-    Serial.println("  python <sd.py>");
+    Serial.println("  python <sd.py> [args...]");
     Serial.println("  python --reset");
     Serial.println("  term dump");
 }
@@ -4274,12 +5305,34 @@ void serialPrintSdStatus()
         Serial.printf("sd=not ready error=%s\r\n", sdLastError.c_str());
         return;
     }
-    Serial.printf("sd=ready type=%u size=%llu used=%llu total=%llu cwd=%s\r\n",
+    uint64_t total = SD.totalBytes();
+    uint64_t used = SD.usedBytes();
+    uint64_t avail = total > used ? total - used : 0;
+    Serial.printf("sd=ready type=%u card=%llu size=%llu used=%llu avail=%llu cwd=%s\r\n",
                   static_cast<unsigned>(SD.cardType()),
                   static_cast<unsigned long long>(SD.cardSize()),
-                  static_cast<unsigned long long>(SD.usedBytes()),
-                  static_cast<unsigned long long>(SD.totalBytes()),
+                  static_cast<unsigned long long>(total),
+                  static_cast<unsigned long long>(used),
+                  static_cast<unsigned long long>(avail),
                   sdCwd.c_str());
+}
+
+void serialPrintSdDf()
+{
+    if (!ensureSdReady()) {
+        Serial.printf("ERR sd %s\r\n", sdLastError.c_str());
+        return;
+    }
+    uint64_t total = SD.totalBytes();
+    uint64_t used = SD.usedBytes();
+    uint64_t avail = total > used ? total - used : 0;
+    uint32_t usePct = total ? static_cast<uint32_t>((used * 100ULL + total - 1) / total) : 0;
+    Serial.println("Filesystem      Size  Used Avail Use% Mounted on");
+    Serial.printf("microSD         %s  %s  %s  %u%% /sd\r\n",
+                  formatBytes(total).c_str(),
+                  formatBytes(used).c_str(),
+                  formatBytes(avail).c_str(),
+                  static_cast<unsigned>(usePct));
 }
 
 void serialPrintSdList(const String& inputPath)
@@ -4288,23 +5341,45 @@ void serialPrintSdList(const String& inputPath)
         Serial.printf("ERR sd %s\r\n", sdLastError.c_str());
         return;
     }
-    String path = normalizeSdPath(inputPath);
+    LsOptions options;
+    String error;
+    if (!parseLsOptions(inputPath, options, error)) {
+        Serial.println(error);
+        return;
+    }
+    String path = normalizeSdPath(options.path);
     File root = SD.open(path, FILE_READ);
     if (!root) {
         Serial.printf("ERR cannot open %s\r\n", path.c_str());
         return;
     }
-    if (!root.isDirectory()) {
-        Serial.printf("FILE %s %u\r\n", path.c_str(), static_cast<unsigned>(root.size()));
+    if (root.isDirectory() && !sdPathHasExecutePermission(path)) {
+        Serial.printf("ERR permission denied %s\r\n", path.c_str());
         root.close();
         return;
     }
-    Serial.printf("DIR %s\r\n", path.c_str());
+    if (!root.isDirectory()) {
+        Serial.println(lsDisplayLine(root, basenameOnly(path), path, options));
+        root.close();
+        return;
+    }
+    if (!options.longFormat) {
+        std::vector<String> names = collectLsNames(root, path, options);
+        serialPrintLsColumns(names, 80);
+        root.close();
+        return;
+    }
+    if (options.longFormat) {
+        Serial.printf("total %s  %s\r\n", formatBytes(root.size()).c_str(), path.c_str());
+    }
     File file = root.openNextFile();
     while (file) {
-        Serial.printf("%c %u %s\r\n", file.isDirectory() ? 'd' : 'f',
-                      static_cast<unsigned>(file.size()),
-                      file.name());
+        String displayName = basenameOnly(file.name());
+        if (!options.all && displayName.startsWith(".")) {
+            file = root.openNextFile();
+            continue;
+        }
+        Serial.println(lsDisplayLine(file, displayName, joinSdPath(path, displayName), options));
         file = root.openNextFile();
     }
     root.close();
@@ -4317,6 +5392,10 @@ void serialPrintSdCat(const String& inputPath)
         return;
     }
     String path = normalizeSdPath(inputPath);
+    if (!sdPathHasReadPermission(path)) {
+        Serial.printf("ERR permission denied %s\r\n", path.c_str());
+        return;
+    }
     File file = SD.open(path, FILE_READ);
     if (!file || file.isDirectory()) {
         Serial.printf("ERR cannot open %s\r\n", path.c_str());
@@ -4349,6 +5428,10 @@ void serialWriteSdText(const String& command, bool append)
     }
     String path = normalizeSdPath(rest.substring(0, split));
     String text = rest.substring(split + 1);
+    if (SD.exists(path) && !sdPathHasWritePermission(path)) {
+        Serial.printf("ERR permission denied %s\r\n", path.c_str());
+        return;
+    }
     if (!append && SD.exists(path)) {
         SD.remove(path);
     }
@@ -4361,6 +5444,48 @@ void serialWriteSdText(const String& command, bool append)
     file.print("\n");
     file.close();
     Serial.printf("OK %s %s\r\n", append ? "appended" : "wrote", path.c_str());
+}
+
+void serialMakeSdDirectory(const String& inputPath)
+{
+    String message;
+    bool ok = makeSdDirectory(inputPath, message);
+    Serial.printf("%s %s\r\n", ok ? "OK" : "ERR", message.c_str());
+}
+
+void serialRemoveSdDirectory(const String& inputPath)
+{
+    String message;
+    bool ok = removeSdDirectory(inputPath, message);
+    Serial.printf("%s %s\r\n", ok ? "OK" : "ERR", message.c_str());
+}
+
+void serialChmodSd(const String& command)
+{
+    if (!ensureSdReady()) {
+        Serial.printf("ERR sd %s\r\n", sdLastError.c_str());
+        return;
+    }
+    String rest = command.substring(strlen("sd chmod "));
+    rest.trim();
+    int split = rest.indexOf(' ');
+    if (split <= 0) {
+        Serial.println("ERR usage");
+        return;
+    }
+    uint16_t mode = 0;
+    String modeText = rest.substring(0, split);
+    if (!parseOctalMode(modeText, mode)) {
+        Serial.println("ERR invalid mode");
+        return;
+    }
+    String path = normalizeSdPath(rest.substring(split + 1));
+    if (!SD.exists(path)) {
+        Serial.printf("ERR cannot access %s\r\n", path.c_str());
+        return;
+    }
+    setSdModeForPath(path, mode);
+    Serial.printf("OK mode %s %s\r\n", modeText.c_str(), path.c_str());
 }
 
 void serialRunScpCommand(const String& command)
@@ -4471,9 +5596,16 @@ void serialRunPythonCommand(const String& command)
             Serial.printf("ERR sd %s\r\n", sdLastError.c_str());
             return;
         }
-        String path = normalizeSdPath(command.substring(strlen("python ")));
+        String pathArg;
+        String args;
+        splitPythonScriptCommand(command.substring(strlen("python ")), pathArg, args);
+        String path = normalizeSdPath(pathArg);
+        if (!sdPathHasReadPermission(path)) {
+            Serial.printf("ERR python permission denied %s\r\n", path.c_str());
+            return;
+        }
         uint32_t start = millis();
-        bool ok = python.runFile(SD, path, serialPythonLine);
+        bool ok = python.runFile(SD, path, args, serialPythonLine);
         Serial.println(ok ? String("OK python done ") + (millis() - start) + " ms"
                           : String("ERR python ") + python.lastError());
     } else if (lower == "python") {
@@ -4594,20 +5726,34 @@ void handleSerialCommand(String command)
         Serial.printf("resetStageMagic=0x%08x stage=%s\r\n", static_cast<unsigned>(crashStageMagic), crashStage);
     } else if (command == "sd status") {
         serialPrintSdStatus();
+    } else if (command == "sd df" || command == "df") {
+        serialPrintSdDf();
     } else if (command == "sd ls" || command.startsWith("sd ls ")) {
         serialPrintSdList(command.length() > strlen("sd ls") ? command.substring(strlen("sd ls ")) : "");
     } else if (command.startsWith("sd cat ")) {
         serialPrintSdCat(command.substring(strlen("sd cat ")));
+    } else if (command.startsWith("sd mkdir ")) {
+        serialMakeSdDirectory(command.substring(strlen("sd mkdir ")));
+    } else if (command.startsWith("sd rmdir ")) {
+        serialRemoveSdDirectory(command.substring(strlen("sd rmdir ")));
     } else if (command.startsWith("sd write ")) {
         serialWriteSdText(command, false);
     } else if (command.startsWith("sd append ")) {
         serialWriteSdText(command, true);
+    } else if (command.startsWith("sd chmod ")) {
+        serialChmodSd(command);
     } else if (command == "wifi status") {
         Serial.printf("wifiStatus=%s wl=%d ip=%s ssid=%s\r\n",
                       wifiStatusText.c_str(),
                       static_cast<int>(WiFi.status()),
                       WiFi.localIP().toString().c_str(),
                       WiFi.SSID().c_str());
+    } else if (command == "wifi off") {
+        stopWifiRuntime();
+        Serial.println("OK wifi off");
+    } else if (command == "wifi on") {
+        enableWifiRuntime(20000);
+        Serial.println("OK wifi on");
     } else if (command == "ssh list") {
         serialPrintSshProfiles();
     } else if (command == "term dump") {

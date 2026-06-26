@@ -1,0 +1,22 @@
+life.py - Conway's Game of Life demo
+
+Run:
+  python /life.py [wait_ms] [frames] [cell_px]
+
+Arguments:
+  wait_ms   Delay after each frame in milliseconds. Default: 0.
+  frames    Maximum number of generations to draw. Default: 200.
+  cell_px   Cell size in pixels. Default: 12. Minimum: 6.
+
+Controls:
+  Ctrl-C or q stops the demo.
+
+Notes:
+  The board is fixed at 25x25 cells and is drawn through gfx.mono(), a packed
+  1-bit bitmap drawing command. This keeps the MicroPython side small and lets
+  the firmware draw the board into the M5GFX sprite more quickly.
+
+Examples:
+  python /life.py
+  python /life.py 20
+  python /life.py 0 500 10
