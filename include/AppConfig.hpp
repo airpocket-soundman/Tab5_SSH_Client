@@ -23,6 +23,9 @@ struct KeyboardConfig {
     String terminalFont{"mono12"};
     uint8_t terminalLineStep{15};
     bool swapCtrlCaps{false};
+    bool bleKeyboardEnabled{false};
+    String bleKeyboardName;
+    String bleKeyboardAddress;
 };
 
 struct SystemConfig {

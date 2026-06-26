@@ -151,6 +151,7 @@ constexpr Rect FontSaveBtn{256, HeaderH + ContentTopGap, 150, 48};
 
 bool connectSshProfile(const SshProfile& profile);
 bool parseSshCommand(const String& line, SshProfile& profile, String& error);
+void inheritSavedSshCredentials(SshProfile& profile);
 void connectActiveSsh();
 bool parseTrailingIndex(const String& command, size_t prefixLen, size_t& index);
 void configureTerminal();
@@ -1281,6 +1282,8 @@ void appendCliHelp()
     appendCliLine("  ssh list, ssh connect <index>, ssh disconnect");
     appendCliLine("  ssh user@host[:port] [password]");
     appendCliLine("  sd status, ls [path], cat <path>, sd write <path> <text>");
+    appendCliLine("  scp get <remote> <sd-local>, scp put <sd-local> <remote>");
+    appendCliLine("  ble status, ble scan, ble forget");
 }
 
 void appendCliManEntry(const char* name, const char* synopsis, const char* description)
@@ -1372,6 +1375,17 @@ bool appendCliMan(const String& topic)
     }
     if (key == "ssh direct" || key == "ssh user@host" || key == "ssh user@host[:port]") {
         appendCliManEntry("ssh direct", "ssh user@host[:port] [password]", "Connect without a saved profile.");
+        return true;
+    }
+    if (key == "scp" || key == "scp get" || key == "scp put") {
+        appendCliManEntry("scp", "scp get <remote> <sd-local> [profile] | scp put <sd-local> <remote> [profile]",
+                          "Copy files between the active SSH profile and the Tab5 microSD card.");
+        appendCliLine("Direct endpoints are supported: user@host:/path.");
+        return true;
+    }
+    if (key == "ble" || key == "ble status" || key == "ble scan" || key == "ble forget") {
+        appendCliManEntry("ble", "ble status | ble scan | ble forget",
+                          "Manage Bluetooth keyboard settings. Pairing backend depends on the Tab5 radio stack build.");
         return true;
     }
     if (key == "sd" || key == "sd status") {
@@ -1663,6 +1677,183 @@ bool handleSdCliCommand(const String& command, const String& lower)
     return false;
 }
 
+bool parseScpProfileIndex(String& rest, size_t& index)
+{
+    rest.trim();
+    int split = rest.lastIndexOf(' ');
+    if (split < 0) {
+        index = activeSsh;
+        return activeSsh < config.ssh.size();
+    }
+    String tail = rest.substring(split + 1);
+    for (size_t i = 0; i < tail.length(); ++i) {
+        if (!std::isdigit(static_cast<unsigned char>(tail[i]))) {
+            index = activeSsh;
+            return activeSsh < config.ssh.size();
+        }
+    }
+    size_t parsed = static_cast<size_t>(tail.toInt());
+    if (parsed >= config.ssh.size()) {
+        return false;
+    }
+    rest = rest.substring(0, split);
+    rest.trim();
+    index = parsed;
+    return true;
+}
+
+bool parseDirectScpEndpoint(const String& endpoint, SshProfile& profile, String& remotePath)
+{
+    int at = endpoint.indexOf('@');
+    int colon = endpoint.indexOf(':', at + 1);
+    if (at <= 0 || colon <= at + 1 || colon >= static_cast<int>(endpoint.length()) - 1) {
+        return false;
+    }
+    profile = SshProfile{};
+    profile.user = endpoint.substring(0, at);
+    profile.host = endpoint.substring(at + 1, colon);
+    profile.port = 22;
+    profile.terminal = "xterm-256color";
+    remotePath = endpoint.substring(colon + 1);
+    profile.name = String("direct ") + profile.user + "@" + profile.host;
+    inheritSavedSshCredentials(profile);
+    return profile.user.length() && profile.host.length() && remotePath.length();
+}
+
+bool splitScpPaths(String rest, String& first, String& second, String& trailing)
+{
+    rest.trim();
+    int split = rest.indexOf(' ');
+    if (split <= 0) {
+        return false;
+    }
+    first = rest.substring(0, split);
+    rest = rest.substring(split + 1);
+    rest.trim();
+    split = rest.indexOf(' ');
+    if (split < 0) {
+        second = rest;
+        trailing = "";
+    } else {
+        second = rest.substring(0, split);
+        trailing = rest.substring(split + 1);
+        trailing.trim();
+    }
+    first.trim();
+    second.trim();
+    return first.length() && second.length();
+}
+
+bool handleScpCliCommand(const String& command, const String& lower)
+{
+    if (lower == "scp" || lower == "scp help") {
+        appendCliLine("usage:");
+        appendCliLine("  scp get <remote> <sd-local> [profile-index]");
+        appendCliLine("  scp put <sd-local> <remote> [profile-index]");
+        appendCliLine("  scp get user@host:/remote <sd-local> [password]");
+        appendCliLine("  scp put <sd-local> user@host:/remote [password]");
+        return true;
+    }
+    const bool isGet = lower.startsWith("scp get ");
+    const bool isPut = lower.startsWith("scp put ");
+    if (!isGet && !isPut) {
+        return false;
+    }
+    if (!ensureSdReady()) {
+        appendCliLine(String("sd: ") + sdLastError);
+        return true;
+    }
+    String rest = command.substring(isGet ? strlen("scp get ") : strlen("scp put "));
+    String first;
+    String second;
+    String trailing;
+    if (!splitScpPaths(rest, first, second, trailing)) {
+        appendCliLine(String("usage: scp ") + (isGet ? "get" : "put") +
+                      (isGet ? " <remote> <sd-local> [profile-index]" : " <sd-local> <remote> [profile-index]"));
+        return true;
+    }
+
+    SshProfile profile;
+    String remotePath;
+    String localPath;
+    const bool direct = isGet ? parseDirectScpEndpoint(first, profile, remotePath)
+                              : parseDirectScpEndpoint(second, profile, remotePath);
+    if (direct) {
+        if (trailing.length()) {
+            profile.password = trailing;
+        }
+        localPath = isGet ? second : first;
+    } else {
+        if (config.ssh.empty()) {
+            appendCliLine("scp: no SSH profiles");
+            return true;
+        }
+        rest = command.substring(isGet ? strlen("scp get ") : strlen("scp put "));
+        size_t profileIndex = activeSsh;
+        if (!parseScpProfileIndex(rest, profileIndex)) {
+            appendCliLine("scp: invalid profile index");
+            return true;
+        }
+        if (!splitScpPaths(rest, first, second, trailing)) {
+            appendCliLine("scp: missing paths");
+            return true;
+        }
+        profile = config.ssh[profileIndex];
+        remotePath = isGet ? first : second;
+        localPath = isGet ? second : first;
+    }
+
+    String error;
+    appendCliLine(String("scp ") + (isGet ? "get " : "put ") + profile.user + "@" + profile.host);
+    bool ok = false;
+    if (isGet) {
+        ok = ssh.scpDownload(profile, remotePath, SD, normalizeSdPath(localPath), error);
+    } else {
+        ok = ssh.scpUpload(profile, SD, normalizeSdPath(localPath), remotePath, error);
+    }
+    appendCliLine(ok ? "scp: done" : String("scp: failed: ") + error);
+    return true;
+}
+
+bool handleBleCliCommand(const String&, const String& lower)
+{
+    if (lower == "ble" || lower == "ble status") {
+        appendCliLine(keyboard.bleStatus());
+        return true;
+    }
+    if (lower == "ble scan") {
+        String result;
+        bool ok = keyboard.bleScan(result);
+        appendCliLine(String(ok ? "ble scan: " : "ble scan failed: ") + result);
+        return true;
+    }
+    if (lower.startsWith("ble pair ")) {
+        String indexText = lower.substring(strlen("ble pair "));
+        indexText.trim();
+        String result;
+        bool ok = keyboard.blePair(static_cast<size_t>(indexText.toInt()), result);
+        appendCliLine(String(ok ? "ble pair: " : "ble pair failed: ") + result);
+        return true;
+    }
+    if (lower == "ble forget") {
+        String result;
+        bool ok = keyboard.bleForget(result);
+        config.keyboard.bleKeyboardName = "";
+        config.keyboard.bleKeyboardAddress = "";
+        saveConfig();
+        appendCliLine(String(ok ? "ble forget: " : "ble forget failed: ") + result);
+        return true;
+    }
+    if (lower == "ble enable" || lower == "ble disable") {
+        config.keyboard.bleKeyboardEnabled = lower == "ble enable";
+        keyboard.configure(config.keyboard);
+        saveConfig();
+        appendCliLine(keyboard.bleStatus());
+        return true;
+    }
+    return false;
+}
+
 String formattedDateTime()
 {
     time_t now = time(nullptr);
@@ -1743,6 +1934,7 @@ bool handleTab5CliCommand(const String& line)
         appendCliLine(String("device=") + config.system.deviceName + " region=" + config.system.region);
         appendCliLine(String("time=") + (timeSynced ? formattedDateTime() : "not synced"));
         appendCliLine(String("keymap=") + config.keyboard.layout + " keyboard=" + keyboard.status());
+        appendCliLine(String("ble=") + keyboard.bleStatus());
         appendCliLine(String("sd=") + (sdReady ? "ready" : sdLastError));
         appendCliLine(String("activeWifi=") + activeWifi + " activeSsh=" + activeSsh);
         return true;
@@ -1786,6 +1978,12 @@ bool handleTab5CliCommand(const String& line)
         return true;
     }
     if (handleSdCliCommand(command, lower)) {
+        return true;
+    }
+    if (handleScpCliCommand(command, lower)) {
+        return true;
+    }
+    if (handleBleCliCommand(command, lower)) {
         return true;
     }
     if (lower == "wifi status") {
@@ -2543,7 +2741,10 @@ String configFieldValue(uint8_t field)
     if (field == 1) return config.system.region;
     if (field == 2) return String(config.system.utcOffsetMinutes);
     if (field == 3) return config.system.ntpServer;
-    return config.keyboard.layout;
+    if (field == 4) return config.keyboard.layout;
+    if (field == 5) return config.keyboard.bleKeyboardEnabled ? "on" : "off";
+    if (field == 6) return config.keyboard.bleKeyboardName;
+    return config.keyboard.bleKeyboardAddress;
 }
 
 void setConfigFieldValue(uint8_t field, const String& value)
@@ -2557,13 +2758,20 @@ void setConfigFieldValue(uint8_t field, const String& value)
         layout.toLowerCase();
         config.keyboard.layout = layout == "jp" ? "jp" : "us";
     }
+    if (field == 5) {
+        String enabled = value;
+        enabled.toLowerCase();
+        config.keyboard.bleKeyboardEnabled = enabled == "on" || enabled == "1" || enabled == "yes" || enabled == "true";
+    }
+    if (field == 6) config.keyboard.bleKeyboardName = value;
+    if (field == 7) config.keyboard.bleKeyboardAddress = value;
 }
 
 uint8_t editFieldCount()
 {
     if (screen == Screen::WifiEdit) return 3;
     if (screen == Screen::SshEdit) return 6;
-    if (screen == Screen::ConfigEdit) return 5;
+    if (screen == Screen::ConfigEdit) return 8;
     return 0;
 }
 
@@ -2584,7 +2792,7 @@ void setCurrentEditFieldValue(const String& value)
 
 bool isChoiceEditField()
 {
-    return screen == Screen::ConfigEdit && editField == 4;
+    return screen == Screen::ConfigEdit && (editField == 4 || editField == 5);
 }
 
 void toggleChoiceEditField()
@@ -2592,8 +2800,13 @@ void toggleChoiceEditField()
     if (!isChoiceEditField()) {
         return;
     }
-    config.keyboard.layout = config.keyboard.layout == "jp" ? "us" : "jp";
-    editCursor = config.keyboard.layout.length();
+    if (editField == 4) {
+        config.keyboard.layout = config.keyboard.layout == "jp" ? "us" : "jp";
+        editCursor = config.keyboard.layout.length();
+    } else if (editField == 5) {
+        config.keyboard.bleKeyboardEnabled = !config.keyboard.bleKeyboardEnabled;
+        editCursor = configFieldValue(editField).length();
+    }
     dirty = true;
 }
 
@@ -2792,7 +3005,7 @@ void drawEditFields(const char* title, const char* const* labels, uint8_t count,
         else if (screen == Screen::SshEdit) rawValue = sshFieldValue(i);
         else rawValue = configFieldValue(i);
         bool secret = (screen == Screen::SshEdit && i == 4) || (screen == Screen::WifiEdit && i == 2);
-        bool choiceField = screen == Screen::ConfigEdit && i == 4;
+        bool choiceField = screen == Screen::ConfigEdit && (i == 4 || i == 5);
         String value = safeValue(rawValue, secret);
         size_t cursor = (i == editField && !choiceField) ? min(editCursor, rawValue.length()) : rawValue.length();
         if (secret) cursor = min(cursor, value.length());
@@ -2881,8 +3094,8 @@ void draw()
         static const char* const labels[] = {"Name", "Host", "Port", "User", "Password", "Term"};
         drawEditFields("Edit SSH", labels, 6, true);
     } else if (screen == Screen::ConfigEdit) {
-        static const char* const labels[] = {"Device", "Region", "UTC min", "NTP", "Keymap"};
-        drawEditFields("Config", labels, 5, false);
+        static const char* const labels[] = {"Device", "Region", "UTC min", "NTP", "Keymap", "BLE KB", "BLE Name", "BLE Addr"};
+        drawEditFields("Config", labels, 8, false);
     } else if (screen == Screen::FontList) {
         drawFontList();
     }
@@ -3398,7 +3611,7 @@ void handleEditTouch(int, int y)
     uint8_t field = static_cast<uint8_t>((y - settingListTop()) / settingRowH());
     uint8_t maxField = editFieldCount();
     if (field < maxField) {
-        bool toggle = screen == Screen::ConfigEdit && field == 4;
+        bool toggle = screen == Screen::ConfigEdit && (field == 4 || field == 5);
         editField = field;
         setEditCursorToEnd();
         if (toggle) {
@@ -3932,6 +4145,8 @@ void serialPrintHelp()
     Serial.println("  status");
     Serial.println("  crash");
     Serial.println("  sd status");
+    Serial.println("  sd ls [path]");
+    Serial.println("  sd cat <path>");
     Serial.println("  wifi status");
     Serial.println("  ssh list");
     Serial.println("  ssh active <index>");
@@ -3939,12 +4154,17 @@ void serialPrintHelp()
     Serial.println("  ssh send <text>");
     Serial.println("  ssh raw <hex bytes>");
     Serial.println("  ssh disconnect");
+    Serial.println("  scp get <remote> <sd-local> [profile-index]");
+    Serial.println("  scp put <sd-local> <remote> [profile-index]");
+    Serial.println("  scp get user@host:/remote <sd-local> [password]");
+    Serial.println("  scp put <sd-local> user@host:/remote [password]");
+    Serial.println("  ble status|enable|disable|scan|pair <index>|forget");
     Serial.println("  term dump");
 }
 
 void serialPrintStatus()
 {
-    Serial.printf("screen=%u wifi=%s wl=%d ssh=%s activeWifi=%u activeSsh=%u keymap=%s sd=%s keyboard=%s stage=%s\r\n",
+    Serial.printf("screen=%u wifi=%s wl=%d ssh=%s activeWifi=%u activeSsh=%u keymap=%s sd=%s keyboard=%s ble=%s stage=%s\r\n",
                   static_cast<unsigned>(screen),
                   wifiStatusText.c_str(),
                   static_cast<int>(WiFi.status()),
@@ -3954,6 +4174,7 @@ void serialPrintStatus()
                   config.keyboard.layout.c_str(),
                   sdReady ? "ready" : sdLastError.c_str(),
                   keyboard.status().c_str(),
+                  keyboard.bleStatus().c_str(),
                   crashStage);
 }
 
@@ -3969,6 +4190,149 @@ void serialPrintSdStatus()
                   static_cast<unsigned long long>(SD.usedBytes()),
                   static_cast<unsigned long long>(SD.totalBytes()),
                   sdCwd.c_str());
+}
+
+void serialPrintSdList(const String& inputPath)
+{
+    if (!ensureSdReady()) {
+        Serial.printf("ERR sd %s\r\n", sdLastError.c_str());
+        return;
+    }
+    String path = normalizeSdPath(inputPath);
+    File root = SD.open(path, FILE_READ);
+    if (!root) {
+        Serial.printf("ERR cannot open %s\r\n", path.c_str());
+        return;
+    }
+    if (!root.isDirectory()) {
+        Serial.printf("FILE %s %u\r\n", path.c_str(), static_cast<unsigned>(root.size()));
+        root.close();
+        return;
+    }
+    Serial.printf("DIR %s\r\n", path.c_str());
+    File file = root.openNextFile();
+    while (file) {
+        Serial.printf("%c %u %s\r\n", file.isDirectory() ? 'd' : 'f',
+                      static_cast<unsigned>(file.size()),
+                      file.name());
+        file = root.openNextFile();
+    }
+    root.close();
+}
+
+void serialPrintSdCat(const String& inputPath)
+{
+    if (!ensureSdReady()) {
+        Serial.printf("ERR sd %s\r\n", sdLastError.c_str());
+        return;
+    }
+    String path = normalizeSdPath(inputPath);
+    File file = SD.open(path, FILE_READ);
+    if (!file || file.isDirectory()) {
+        Serial.printf("ERR cannot open %s\r\n", path.c_str());
+        return;
+    }
+    Serial.printf("BEGIN %s %u\r\n", path.c_str(), static_cast<unsigned>(file.size()));
+    size_t sent = 0;
+    while (file.available() && sent < 4096) {
+        Serial.write(file.read());
+        ++sent;
+    }
+    file.close();
+    Serial.println();
+    Serial.println(sent >= 4096 ? "END truncated" : "END");
+}
+
+void serialRunScpCommand(const String& command)
+{
+    String lower = command;
+    lower.toLowerCase();
+    const bool isGet = lower.startsWith("scp get ");
+    const bool isPut = lower.startsWith("scp put ");
+    if (!isGet && !isPut) {
+        Serial.println("ERR usage");
+        return;
+    }
+    if (!ensureSdReady()) {
+        Serial.printf("ERR sd %s\r\n", sdLastError.c_str());
+        return;
+    }
+    String rest = command.substring(isGet ? strlen("scp get ") : strlen("scp put "));
+    String first;
+    String second;
+    String trailing;
+    if (!splitScpPaths(rest, first, second, trailing)) {
+        Serial.println("ERR missing paths");
+        return;
+    }
+
+    SshProfile profile;
+    String remotePath;
+    String localPath;
+    const bool direct = isGet ? parseDirectScpEndpoint(first, profile, remotePath)
+                              : parseDirectScpEndpoint(second, profile, remotePath);
+    if (direct) {
+        if (trailing.length()) {
+            profile.password = trailing;
+        }
+        localPath = isGet ? second : first;
+    } else {
+        if (config.ssh.empty()) {
+            Serial.println("ERR no SSH profiles");
+            return;
+        }
+        rest = command.substring(isGet ? strlen("scp get ") : strlen("scp put "));
+        size_t profileIndex = activeSsh;
+        if (!parseScpProfileIndex(rest, profileIndex)) {
+            Serial.println("ERR invalid profile index");
+            return;
+        }
+        if (!splitScpPaths(rest, first, second, trailing)) {
+            Serial.println("ERR missing paths");
+            return;
+        }
+        profile = config.ssh[profileIndex];
+        remotePath = isGet ? first : second;
+        localPath = isGet ? second : first;
+    }
+    String error;
+    bool ok = isGet
+        ? ssh.scpDownload(profile, remotePath, SD, normalizeSdPath(localPath), error)
+        : ssh.scpUpload(profile, SD, normalizeSdPath(localPath), remotePath, error);
+    Serial.println(ok ? "OK scp done" : String("ERR scp failed: ") + error);
+}
+
+void serialRunBleCommand(const String& command)
+{
+    String lower = command;
+    lower.toLowerCase();
+    if (lower == "ble status") {
+        Serial.println(keyboard.bleStatus());
+    } else if (lower == "ble enable" || lower == "ble disable") {
+        config.keyboard.bleKeyboardEnabled = lower == "ble enable";
+        keyboard.configure(config.keyboard);
+        saveConfig();
+        Serial.println(keyboard.bleStatus());
+    } else if (lower == "ble scan") {
+        String result;
+        bool ok = keyboard.bleScan(result);
+        Serial.println(String(ok ? "OK " : "ERR ") + result);
+    } else if (lower.startsWith("ble pair ")) {
+        String indexText = lower.substring(strlen("ble pair "));
+        indexText.trim();
+        String result;
+        bool ok = keyboard.blePair(static_cast<size_t>(indexText.toInt()), result);
+        Serial.println(String(ok ? "OK " : "ERR ") + result);
+    } else if (lower == "ble forget") {
+        String result;
+        bool ok = keyboard.bleForget(result);
+        config.keyboard.bleKeyboardName = "";
+        config.keyboard.bleKeyboardAddress = "";
+        saveConfig();
+        Serial.println(String(ok ? "OK " : "ERR ") + result);
+    } else {
+        Serial.println("ERR usage");
+    }
 }
 
 void serialPrintSshProfiles()
@@ -4082,6 +4446,10 @@ void handleSerialCommand(String command)
         Serial.printf("resetStageMagic=0x%08x stage=%s\r\n", static_cast<unsigned>(crashStageMagic), crashStage);
     } else if (command == "sd status") {
         serialPrintSdStatus();
+    } else if (command == "sd ls" || command.startsWith("sd ls ")) {
+        serialPrintSdList(command.length() > strlen("sd ls") ? command.substring(strlen("sd ls ")) : "");
+    } else if (command.startsWith("sd cat ")) {
+        serialPrintSdCat(command.substring(strlen("sd cat ")));
     } else if (command == "wifi status") {
         Serial.printf("wifiStatus=%s wl=%d ip=%s ssid=%s\r\n",
                       wifiStatusText.c_str(),
@@ -4132,6 +4500,11 @@ void handleSerialCommand(String command)
         configureTerminal();
         appendStatus("SSH disconnected");
         Serial.println("OK");
+    } else if (command.startsWith("scp ")) {
+        serialRunScpCommand(command);
+    } else if (command == "ble status" || command == "ble enable" || command == "ble disable" ||
+               command == "ble scan" || command == "ble forget" || command.startsWith("ble pair ")) {
+        serialRunBleCommand(command);
     } else {
         Serial.println("ERR unknown command; type help");
     }

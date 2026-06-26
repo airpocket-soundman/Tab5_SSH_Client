@@ -318,6 +318,14 @@ extern "C" void tuh_hid_report_received_cb(uint8_t dev_addr, uint8_t idx, const 
 void Tab5KeyboardInput::configure(const KeyboardConfig& config)
 {
     mapper.configure(config);
+    _bleEnabled = config.bleKeyboardEnabled;
+    _bleName = config.bleKeyboardName;
+    _bleAddress = config.bleKeyboardAddress;
+    if (_bleEnabled) {
+        _bleRuntimeStatus = "BLE keyboard enabled; HID backend unavailable on this build";
+    } else {
+        _bleRuntimeStatus = "BLE keyboard disabled";
+    }
     activeInput = this;
 }
 
@@ -353,6 +361,9 @@ bool Tab5KeyboardInput::begin()
         _status += "; USB host unavailable";
     }
 #endif
+    if (_bleEnabled) {
+        _status += "; BLE keyboard pending";
+    }
     return tab5Ready;
 }
 
@@ -441,6 +452,50 @@ KeyAction Tab5KeyboardInput::read()
     KeyAction action = _queue[_tail];
     _tail = (_tail + 1) % QueueSize;
     return action;
+}
+
+String Tab5KeyboardInput::bleStatus() const
+{
+    String text = _bleRuntimeStatus;
+    if (_bleName.length()) {
+        text += String(" name=") + _bleName;
+    }
+    if (_bleAddress.length()) {
+        text += String(" addr=") + _bleAddress;
+    }
+    return text;
+}
+
+bool Tab5KeyboardInput::bleScan(String& result)
+{
+#if ENABLE_BLE_HID_KEYBOARD
+    result = "BLE HID backend is enabled, but scanner is not bound yet";
+    return false;
+#else
+    result = "BLE HID backend unavailable on ESP32-P4 Arduino build";
+    return false;
+#endif
+}
+
+bool Tab5KeyboardInput::blePair(size_t index, String& result)
+{
+    (void)index;
+#if ENABLE_BLE_HID_KEYBOARD
+    result = "BLE HID backend is enabled, but pairing is not bound yet";
+    return false;
+#else
+    result = "BLE HID backend unavailable on ESP32-P4 Arduino build";
+    return false;
+#endif
+}
+
+bool Tab5KeyboardInput::bleForget(String& result)
+{
+    _bleName = "";
+    _bleAddress = "";
+    _bleRuntimeStatus = _bleEnabled ? "BLE keyboard enabled; no paired keyboard" : "BLE keyboard disabled";
+    result = "BLE keyboard pairing cleared";
+    return true;
 }
 
 void Tab5KeyboardInput::push(const KeyAction& action)
