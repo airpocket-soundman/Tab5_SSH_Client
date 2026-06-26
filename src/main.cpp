@@ -1,4 +1,5 @@
 #include "SettingsStore.hpp"
+#include "PythonRunner.hpp"
 #include "SshClient.hpp"
 #include "Tab5KeyboardInput.hpp"
 #include "TerminalBuffer.hpp"
@@ -22,6 +23,7 @@ AppConfig config;
 SettingsStore settings;
 WifiProfiles wifiProfiles;
 SshClient ssh;
+PythonRunner python;
 Tab5KeyboardInput keyboard;
 TerminalBuffer terminal(2500);
 TerminalEmulator vt;
@@ -109,6 +111,7 @@ String commandLine;
 size_t commandCursor = 0;
 std::vector<String> commandHistory;
 size_t commandHistoryIndex = 0;
+bool pythonReplMode = false;
 int touchScrollRemainderY = 0;
 bool touchScrollActive = false;
 bool remoteLineMode = false;
@@ -122,6 +125,7 @@ constexpr bool ForceFixedWifiForTest = false;
 constexpr const char* FixedWifiSsid = "kumakero2.4";
 constexpr const char* FixedWifiPassword = "4roses6126";
 constexpr const char* LocalPrompt = "[tab5] ";
+constexpr const char* PythonPrompt = "[py] ";
 constexpr int SD_SPI_CS_PIN = 42;
 constexpr int SD_SPI_SCK_PIN = 43;
 constexpr int SD_SPI_MOSI_PIN = 44;
@@ -1273,6 +1277,16 @@ void appendCliLine(const String& line)
     terminal.append("\n");
 }
 
+void appendPythonCliLine(const String& line)
+{
+    appendCliLine(line);
+}
+
+void serialPythonLine(const String& line)
+{
+    Serial.println(line);
+}
+
 void appendCliHelp()
 {
     appendCliLine("Tab5 CLI commands:");
@@ -1283,6 +1297,7 @@ void appendCliHelp()
     appendCliLine("  ssh user@host[:port] [password]");
     appendCliLine("  sd status, ls [path], cat <path>, sd write <path> <text>");
     appendCliLine("  scp get <remote> <sd-local>, scp put <sd-local> <remote>");
+    appendCliLine("  py repl, py run <sd.py>, py exec <statement>");
     appendCliLine("  ble status, ble scan, ble forget");
 }
 
@@ -1386,6 +1401,15 @@ bool appendCliMan(const String& topic)
     if (key == "ble" || key == "ble status" || key == "ble scan" || key == "ble forget") {
         appendCliManEntry("ble", "ble status | ble scan | ble forget",
                           "Manage Bluetooth keyboard settings. Pairing backend depends on the Tab5 radio stack build.");
+        return true;
+    }
+    if (key == "py" || key == "python" || key == "py repl" || key == "py run" || key == "py exec") {
+        appendCliManEntry("py", "py repl | py run <sd.py> | py exec <statement>",
+                          "Run the built-in MicroPython-compatible subset with SD scripts and GPIO helpers.");
+        appendCliLine("Examples:");
+        appendCliLine("  py exec print('hello')");
+        appendCliLine("  py exec blink(2, 3, 100)");
+        appendCliLine("  py run /scripts/blink.py");
         return true;
     }
     if (key == "sd" || key == "sd status") {
@@ -1854,6 +1878,52 @@ bool handleBleCliCommand(const String&, const String& lower)
     return false;
 }
 
+bool handlePythonCliCommand(const String& command, const String& lower)
+{
+    if (lower == "py" || lower == "python" || lower == "py help" || lower == "python help") {
+        appendCliLine("py commands:");
+        appendCliLine("  py repl");
+        appendCliLine("  py run <sd.py>");
+        appendCliLine("  py exec <statement>");
+        appendCliLine("  py reset");
+        appendCliLine("GPIO subset: Pin, pin(), digitalWrite(), digitalRead(), blink()");
+        return true;
+    }
+    if (lower == "py repl" || lower == "python repl") {
+        pythonReplMode = true;
+        appendCliLine("MicroPython-compatible REPL subset. Type exit() to return.");
+        return true;
+    }
+    if (lower == "py reset" || lower == "python reset") {
+        python.reset();
+        appendCliLine("py: state reset");
+        return true;
+    }
+    if (lower.startsWith("py exec ") || lower.startsWith("python exec ")) {
+        size_t prefix = lower.startsWith("py exec ") ? strlen("py exec ") : strlen("python exec ");
+        String statement = command.substring(prefix);
+        if (!python.runLine(statement, appendPythonCliLine)) {
+            appendCliLine(String("py: ") + python.lastError());
+        }
+        return true;
+    }
+    if (lower.startsWith("py run ") || lower.startsWith("python run ")) {
+        if (!ensureSdReady()) {
+            appendCliLine(String("sd: ") + sdLastError);
+            return true;
+        }
+        size_t prefix = lower.startsWith("py run ") ? strlen("py run ") : strlen("python run ");
+        String path = normalizeSdPath(command.substring(prefix));
+        appendCliLine(String("py run ") + path);
+        uint32_t start = millis();
+        bool ok = python.runFile(SD, path, appendPythonCliLine);
+        appendCliLine(ok ? String("py: done in ") + (millis() - start) + " ms"
+                         : String("py: failed: ") + python.lastError());
+        return true;
+    }
+    return false;
+}
+
 String formattedDateTime()
 {
     time_t now = time(nullptr);
@@ -1983,6 +2053,9 @@ bool handleTab5CliCommand(const String& line)
     if (handleScpCliCommand(command, lower)) {
         return true;
     }
+    if (handlePythonCliCommand(command, lower)) {
+        return true;
+    }
     if (handleBleCliCommand(command, lower)) {
         return true;
     }
@@ -2035,9 +2108,20 @@ void executeLocalCommand()
 {
     String line = commandLine;
     line.trim();
-    terminal.append(String(LocalPrompt) + line + "\n");
+    terminal.append(String(pythonReplMode ? PythonPrompt : LocalPrompt) + line + "\n");
     rememberCommandHistory(line);
     resetCommandEditor();
+
+    if (pythonReplMode) {
+        if (line == "exit()" || line == "quit()" || line == "exit" || line == "quit") {
+            pythonReplMode = false;
+            appendCliLine("py: exit");
+        } else if (line.length() && !python.runLine(line, appendPythonCliLine)) {
+            appendCliLine(String("py: ") + python.lastError());
+        }
+        dirty = true;
+        return;
+    }
 
     if (!line.length()) {
         dirty = true;
@@ -2857,7 +2941,7 @@ void drawTerminal()
         if (drawEditor && row + 1 == terminal.viewportRows()) {
             int lineTop = HeaderH + static_cast<int>(row) * lineStep;
             clampCommandCursor();
-            String prefix = String(LocalPrompt) + commandLine.substring(0, commandCursor);
+            String prefix = String(pythonReplMode ? PythonPrompt : LocalPrompt) + commandLine.substring(0, commandCursor);
             String cursorGlyph = " ";
             String suffix = "";
             if (commandCursor < commandLine.length()) {
@@ -4147,6 +4231,8 @@ void serialPrintHelp()
     Serial.println("  sd status");
     Serial.println("  sd ls [path]");
     Serial.println("  sd cat <path>");
+    Serial.println("  sd write <path> <text>");
+    Serial.println("  sd append <path> <text>");
     Serial.println("  wifi status");
     Serial.println("  ssh list");
     Serial.println("  ssh active <index>");
@@ -4159,6 +4245,9 @@ void serialPrintHelp()
     Serial.println("  scp get user@host:/remote <sd-local> [password]");
     Serial.println("  scp put <sd-local> user@host:/remote [password]");
     Serial.println("  ble status|enable|disable|scan|pair <index>|forget");
+    Serial.println("  py exec <statement>");
+    Serial.println("  py run <sd.py>");
+    Serial.println("  py reset");
     Serial.println("  term dump");
 }
 
@@ -4241,6 +4330,36 @@ void serialPrintSdCat(const String& inputPath)
     file.close();
     Serial.println();
     Serial.println(sent >= 4096 ? "END truncated" : "END");
+}
+
+void serialWriteSdText(const String& command, bool append)
+{
+    if (!ensureSdReady()) {
+        Serial.printf("ERR sd %s\r\n", sdLastError.c_str());
+        return;
+    }
+    size_t prefix = append ? strlen("sd append ") : strlen("sd write ");
+    String rest = command.substring(prefix);
+    rest.trim();
+    int split = rest.indexOf(' ');
+    if (split <= 0) {
+        Serial.println("ERR usage");
+        return;
+    }
+    String path = normalizeSdPath(rest.substring(0, split));
+    String text = rest.substring(split + 1);
+    if (!append && SD.exists(path)) {
+        SD.remove(path);
+    }
+    File file = SD.open(path, FILE_APPEND);
+    if (!file) {
+        Serial.printf("ERR cannot open %s\r\n", path.c_str());
+        return;
+    }
+    file.print(text);
+    file.print("\n");
+    file.close();
+    Serial.printf("OK %s %s\r\n", append ? "appended" : "wrote", path.c_str());
 }
 
 void serialRunScpCommand(const String& command)
@@ -4330,6 +4449,32 @@ void serialRunBleCommand(const String& command)
         config.keyboard.bleKeyboardAddress = "";
         saveConfig();
         Serial.println(String(ok ? "OK " : "ERR ") + result);
+    } else {
+        Serial.println("ERR usage");
+    }
+}
+
+void serialRunPythonCommand(const String& command)
+{
+    String lower = command;
+    lower.toLowerCase();
+    if (lower == "py reset") {
+        python.reset();
+        Serial.println("OK py state reset");
+    } else if (lower.startsWith("py exec ")) {
+        String statement = command.substring(strlen("py exec "));
+        bool ok = python.runLine(statement, serialPythonLine);
+        Serial.println(ok ? "OK py exec" : String("ERR py ") + python.lastError());
+    } else if (lower.startsWith("py run ")) {
+        if (!ensureSdReady()) {
+            Serial.printf("ERR sd %s\r\n", sdLastError.c_str());
+            return;
+        }
+        String path = normalizeSdPath(command.substring(strlen("py run ")));
+        uint32_t start = millis();
+        bool ok = python.runFile(SD, path, serialPythonLine);
+        Serial.println(ok ? String("OK py done ") + (millis() - start) + " ms"
+                          : String("ERR py ") + python.lastError());
     } else {
         Serial.println("ERR usage");
     }
@@ -4450,6 +4595,10 @@ void handleSerialCommand(String command)
         serialPrintSdList(command.length() > strlen("sd ls") ? command.substring(strlen("sd ls ")) : "");
     } else if (command.startsWith("sd cat ")) {
         serialPrintSdCat(command.substring(strlen("sd cat ")));
+    } else if (command.startsWith("sd write ")) {
+        serialWriteSdText(command, false);
+    } else if (command.startsWith("sd append ")) {
+        serialWriteSdText(command, true);
     } else if (command == "wifi status") {
         Serial.printf("wifiStatus=%s wl=%d ip=%s ssid=%s\r\n",
                       wifiStatusText.c_str(),
@@ -4505,6 +4654,8 @@ void handleSerialCommand(String command)
     } else if (command == "ble status" || command == "ble enable" || command == "ble disable" ||
                command == "ble scan" || command == "ble forget" || command.startsWith("ble pair ")) {
         serialRunBleCommand(command);
+    } else if (command == "py reset" || command.startsWith("py exec ") || command.startsWith("py run ")) {
+        serialRunPythonCommand(command);
     } else {
         Serial.println("ERR unknown command; type help");
     }
