@@ -17,6 +17,9 @@
 #include <cstring>
 #include <esp_system.h>
 #include <time.h>
+#if ENABLE_BLE_HID_KEYBOARD
+#include <BLESecurity.h>
+#endif
 
 namespace {
 AppConfig config;
@@ -29,6 +32,9 @@ TerminalBuffer terminal(2500);
 TerminalEmulator vt;
 M5Canvas screenSprite(&M5.Display);
 bool screenSpriteReady = false;
+
+void saveBlePairingFromKeyboard();
+bool removeBleDeviceConfig(int index, String& result);
 
 enum class Screen : uint8_t {
     Terminal,
@@ -82,6 +88,7 @@ size_t settingScrollOffset = 0;
 bool keyboardMenuMode = false;
 size_t focusedHeaderButton = 0;
 size_t focusedContentItem = 0;
+size_t blePairTarget = 0;
 bool wifiScanActive = false;
 WifiConnectState wifiState = WifiConnectState::Idle;
 volatile bool wifiDisabled = false;
@@ -177,6 +184,7 @@ void draw();
 bool saveConfig();
 bool sendSshText(const String& text);
 void appendStatus(const String& message);
+void handleAction(const KeyAction& action);
 void startTimeSync(bool force = false);
 void setWifiStatus(const String& message);
 void startWifiReconnect(uint32_t timeoutMs = 20000);
@@ -1527,7 +1535,8 @@ void appendCliHelp()
     appendCliLine("  sd write <path> <text>");
     appendCliLine("  scp get <remote> <sd-local>, scp put <sd-local> <remote>");
     appendCliLine("  python, python <sd.py> [args...], python -c <statement>");
-    appendCliLine("  ble status, ble scan, ble forget");
+    appendCliLine("  ble status, ble devices, ble enable, ble disable, ble scan, ble gapauto");
+    appendCliLine("  ble pair <index>, ble disconnect [index|all], ble forget [index|all]");
 }
 
 void appendCliManEntry(const char* name, const char* synopsis, const char* description)
@@ -1658,13 +1667,28 @@ bool appendCliMan(const String& topic)
         appendCliLine("  python /test.py");
         return true;
     }
-    if (key == "ble" || key == "ble status" || key == "ble scan" || key == "ble forget") {
-        appendCliManEntry("ble", "ble status | ble scan | ble forget",
-                          "Manage Bluetooth keyboard settings. Pairing backend depends on the Tab5 radio stack build.");
+    if (key == "ble" || key == "ble status" || key == "ble devices" || key == "ble paired" ||
+        key == "ble gapstatus" || key == "ble enable" || key == "ble disable" || key == "ble scan" ||
+        key == "ble gapauto" || key == "ble scanpair" || key == "ble pair" || key == "ble disconnect" ||
+        key == "ble forget") {
+        appendCliManEntry("ble",
+                          "ble status | ble devices | ble scan | ble gapauto | ble disconnect [index|all] | ble forget [index|all]",
+                          "Manage BLE HID keyboards through the Tab5 ESP32-C6 wireless coprocessor.");
         appendCliLine("EXAMPLES");
+        appendCliLine("  ble enable");
         appendCliLine("  ble status");
+        appendCliLine("  ble devices");
+        appendCliLine("  ble gapstatus");
         appendCliLine("  ble scan");
-        appendCliLine("  ble forget");
+        appendCliLine("  ble pair 0");
+        appendCliLine("  ble gapauto");
+        appendCliLine("  ble disconnect all");
+        appendCliLine("  ble forget 0");
+        appendCliLine("NOTES");
+        appendCliLine("  Put the keyboard in pairing mode before ble scan.");
+        appendCliLine("  ble gapauto scans, connects, subscribes HID input, and stores the device.");
+        appendCliLine("  ble devices shows saved devices and active runtime connections.");
+        appendCliLine("  ble gapstatus shows low-level connection, service, and notification state.");
         return true;
     }
     if (key == "python" || key == "python file" || key == "python -c") {
@@ -2768,10 +2792,37 @@ bool handleBleCliCommand(const String&, const String& lower)
         appendCliLine(keyboard.bleStatus());
         return true;
     }
+    if (lower == "ble devices" || lower == "ble paired") {
+        appendCliLine(keyboard.bleDevicesStatus());
+        return true;
+    }
+    if (lower == "ble gapstatus") {
+        appendCliLine(keyboard.bleGapStatus());
+        return true;
+    }
     if (lower == "ble scan") {
+        config.keyboard.bleKeyboardEnabled = true;
+        keyboard.configure(config.keyboard);
+        saveConfig();
         String result;
         bool ok = keyboard.bleScan(result);
         appendCliLine(String(ok ? "ble scan: " : "ble scan failed: ") + result);
+        for (size_t i = 0; i < keyboard.bleScanCount(); ++i) {
+            appendCliLine(String("  ") + i + ": " + keyboard.bleScanEntry(i));
+        }
+        return true;
+    }
+    if (lower == "ble gapauto" || lower == "ble scanpair") {
+        config.keyboard.bleKeyboardEnabled = true;
+        keyboard.configure(config.keyboard);
+        saveConfig();
+        String result;
+        bool ok = lower == "ble gapauto" ? keyboard.bleGapScanAndSubscribeHid(result)
+                                         : keyboard.bleScanAndPairFirst(result);
+        if (ok) {
+            saveBlePairingFromKeyboard();
+        }
+        appendCliLine(String(ok ? "ble pair: " : "ble pair failed: ") + result);
         return true;
     }
     if (lower.startsWith("ble pair ")) {
@@ -2779,16 +2830,28 @@ bool handleBleCliCommand(const String&, const String& lower)
         indexText.trim();
         String result;
         bool ok = keyboard.blePair(static_cast<size_t>(indexText.toInt()), result);
+        if (ok) {
+            saveBlePairingFromKeyboard();
+        }
         appendCliLine(String(ok ? "ble pair: " : "ble pair failed: ") + result);
         return true;
     }
-    if (lower == "ble forget") {
+    if (lower == "ble disconnect" || lower.startsWith("ble disconnect ")) {
+        String arg = lower == "ble disconnect" ? "all" : lower.substring(strlen("ble disconnect "));
+        arg.trim();
         String result;
-        bool ok = keyboard.bleForget(result);
-        config.keyboard.bleKeyboardName = "";
-        config.keyboard.bleKeyboardAddress = "";
-        saveConfig();
-        appendCliLine(String(ok ? "ble forget: " : "ble forget failed: ") + result);
+        bool ok = keyboard.bleDisconnect(arg == "all" ? -1 : arg.toInt(), result);
+        appendCliLine(String(ok ? "ble disconnect: " : "ble disconnect failed: ") + result);
+        return true;
+    }
+    if (lower == "ble forget" || lower.startsWith("ble forget ")) {
+        String arg = lower == "ble forget" ? "all" : lower.substring(strlen("ble forget "));
+        arg.trim();
+        String result;
+        bool ok = arg == "all" ? keyboard.bleForget(result) : keyboard.bleDisconnect(arg.toInt(), result);
+        String configResult;
+        bool configOk = removeBleDeviceConfig(arg == "all" ? -1 : arg.toInt(), configResult);
+        appendCliLine(String((ok && configOk) ? "ble forget: " : "ble forget failed: ") + configResult + "; " + result);
         return true;
     }
     if (lower == "ble enable" || lower == "ble disable") {
@@ -3831,7 +3894,14 @@ String configFieldValue(uint8_t field)
     if (field == 4) return config.keyboard.layout;
     if (field == 5) return config.keyboard.bleKeyboardEnabled ? "on" : "off";
     if (field == 6) return config.keyboard.bleKeyboardName;
-    return config.keyboard.bleKeyboardAddress;
+    if (field == 7) return config.keyboard.bleKeyboardAddress;
+    if (field == 8) {
+        String entry = keyboard.bleScanEntry(blePairTarget);
+        return entry.length() ? entry : String(blePairTarget);
+    }
+    if (field == 9) return "scan now";
+    if (field == 10) return "pair selected";
+    return "forget paired";
 }
 
 void setConfigFieldValue(uint8_t field, const String& value)
@@ -3852,13 +3922,14 @@ void setConfigFieldValue(uint8_t field, const String& value)
     }
     if (field == 6) config.keyboard.bleKeyboardName = value;
     if (field == 7) config.keyboard.bleKeyboardAddress = value;
+    if (field == 8) blePairTarget = static_cast<size_t>(max<int>(0, value.toInt()));
 }
 
 uint8_t editFieldCount()
 {
     if (screen == Screen::WifiEdit) return 3;
     if (screen == Screen::SshEdit) return 6;
-    if (screen == Screen::ConfigEdit) return 8;
+    if (screen == Screen::ConfigEdit) return 12;
     return 0;
 }
 
@@ -3877,9 +3948,123 @@ void setCurrentEditFieldValue(const String& value)
     if (screen == Screen::ConfigEdit) setConfigFieldValue(editField, value);
 }
 
+void saveBlePairingFromKeyboard()
+{
+    String address = keyboard.bleAddress();
+    if (!address.length()) {
+        return;
+    }
+    BleHidProfile* existing = nullptr;
+    for (auto& profile : config.keyboard.bleDevices) {
+        if (profile.address == address) {
+            existing = &profile;
+            break;
+        }
+    }
+    if (!existing && keyboard.bleName().length()) {
+        for (auto& profile : config.keyboard.bleDevices) {
+            if (profile.name == keyboard.bleName() &&
+                (profile.kind == keyboard.bleKind() || (!profile.kind.length() && keyboard.bleKind() == "keyboard"))) {
+                existing = &profile;
+                break;
+            }
+        }
+    }
+    if (!existing) {
+        config.keyboard.bleDevices.push_back(BleHidProfile{});
+        existing = &config.keyboard.bleDevices.back();
+    }
+    existing->name = keyboard.bleName().length() ? keyboard.bleName() : "BLE HID";
+    existing->address = address;
+    existing->addressType = keyboard.bleAddressType();
+    existing->kind = keyboard.bleKind().length() ? keyboard.bleKind() : "keyboard";
+    existing->enabled = true;
+    for (size_t i = 0; i < config.keyboard.bleDevices.size(); ++i) {
+        if (&config.keyboard.bleDevices[i] == existing) {
+            config.keyboard.activeBle = i;
+            break;
+        }
+    }
+    config.keyboard.bleKeyboardName = existing->name;
+    config.keyboard.bleKeyboardAddress = existing->address;
+    saveConfig();
+    keyboard.configure(config.keyboard);
+}
+
+bool removeBleDeviceConfig(int index, String& result)
+{
+    if (index < 0) {
+        config.keyboard.bleDevices.clear();
+        config.keyboard.activeBle = 0;
+        config.keyboard.bleKeyboardName = "";
+        config.keyboard.bleKeyboardAddress = "";
+        keyboard.configure(config.keyboard);
+        saveConfig();
+        result = "BLE device list cleared";
+        return true;
+    }
+    if (static_cast<size_t>(index) >= config.keyboard.bleDevices.size()) {
+        result = "invalid BLE device index";
+        return false;
+    }
+    config.keyboard.bleDevices.erase(config.keyboard.bleDevices.begin() + index);
+    if (config.keyboard.activeBle >= config.keyboard.bleDevices.size()) {
+        config.keyboard.activeBle = config.keyboard.bleDevices.empty() ? 0 : config.keyboard.bleDevices.size() - 1;
+    }
+    if (config.keyboard.bleDevices.size()) {
+        const auto& active = config.keyboard.bleDevices[config.keyboard.activeBle];
+        config.keyboard.bleKeyboardName = active.name;
+        config.keyboard.bleKeyboardAddress = active.address;
+    } else {
+        config.keyboard.bleKeyboardName = "";
+        config.keyboard.bleKeyboardAddress = "";
+    }
+    keyboard.configure(config.keyboard);
+    saveConfig();
+    result = "BLE device removed";
+    return true;
+}
+
+void executeConfigBleAction(uint8_t field)
+{
+    if (field == 5) {
+        config.keyboard.bleKeyboardEnabled = !config.keyboard.bleKeyboardEnabled;
+        keyboard.configure(config.keyboard);
+        saveConfig();
+        appendStatus(String("BLE keyboard ") + (config.keyboard.bleKeyboardEnabled ? "enabled" : "disabled"));
+    } else if (field == 8) {
+        size_t count = keyboard.bleScanCount();
+        blePairTarget = count ? (blePairTarget + 1) % count : 0;
+        appendStatus(String("BLE target ") + blePairTarget);
+    } else if (field == 9) {
+        config.keyboard.bleKeyboardEnabled = true;
+        keyboard.configure(config.keyboard);
+        saveConfig();
+        String result;
+        bool ok = keyboard.bleScan(result);
+        blePairTarget = 0;
+        appendStatus(String(ok ? "BLE scan: " : "BLE scan failed: ") + result);
+    } else if (field == 10) {
+        String result;
+        bool ok = keyboard.blePair(blePairTarget, result);
+        if (ok) {
+            saveBlePairingFromKeyboard();
+        }
+        appendStatus(String(ok ? "BLE pair: " : "BLE pair failed: ") + result);
+    } else if (field == 11) {
+        String result;
+        bool ok = keyboard.bleForget(result);
+        String configResult;
+        removeBleDeviceConfig(-1, configResult);
+        appendStatus(String(ok ? "BLE forget: " : "BLE forget failed: ") + result);
+    }
+    editCursor = configFieldValue(editField).length();
+    dirty = true;
+}
+
 bool isChoiceEditField()
 {
-    return screen == Screen::ConfigEdit && (editField == 4 || editField == 5);
+    return screen == Screen::ConfigEdit && (editField == 4 || editField == 5 || editField >= 8);
 }
 
 void toggleChoiceEditField()
@@ -3890,9 +4075,9 @@ void toggleChoiceEditField()
     if (editField == 4) {
         config.keyboard.layout = config.keyboard.layout == "jp" ? "us" : "jp";
         editCursor = config.keyboard.layout.length();
-    } else if (editField == 5) {
-        config.keyboard.bleKeyboardEnabled = !config.keyboard.bleKeyboardEnabled;
-        editCursor = configFieldValue(editField).length();
+    } else if (editField >= 5) {
+        executeConfigBleAction(editField);
+        return;
     }
     dirty = true;
 }
@@ -3939,9 +4124,10 @@ void drawTerminal()
     screenSprite.setTextColor(TFT_GREEN, TFT_BLACK);
     const int lineStep = terminalLineStep();
     const bool drawEditor = terminal.atBottom();
+    const size_t editorRow = drawEditor ? terminal.inputViewportRow() : terminal.viewportRows();
     for (size_t row = 0; row < terminal.viewportRows(); ++row) {
         String line = terminal.lineAt(row);
-        if (drawEditor && row + 1 == terminal.viewportRows()) {
+        if (drawEditor && row == editorRow) {
             int lineTop = HeaderH + static_cast<int>(row) * lineStep;
             clampCommandCursor();
             String prefix = String(pythonReplMode ? PythonPrompt : LocalPrompt) + commandLine.substring(0, commandCursor);
@@ -4090,7 +4276,7 @@ void drawEditFields(const char* title, const char* const* labels, uint8_t count,
         else if (screen == Screen::SshEdit) rawValue = sshFieldValue(i);
         else rawValue = configFieldValue(i);
         bool secret = (screen == Screen::SshEdit && i == 4) || (screen == Screen::WifiEdit && i == 2);
-        bool choiceField = screen == Screen::ConfigEdit && (i == 4 || i == 5);
+        bool choiceField = screen == Screen::ConfigEdit && (i == 4 || i == 5 || i >= 8);
         String value = safeValue(rawValue, secret);
         size_t cursor = (i == editField && !choiceField) ? min(editCursor, rawValue.length()) : rawValue.length();
         if (secret) cursor = min(cursor, value.length());
@@ -4180,8 +4366,10 @@ void draw()
         static const char* const labels[] = {"Name", "Host", "Port", "User", "Password", "Term"};
         drawEditFields("Edit SSH", labels, 6, true);
     } else if (screen == Screen::ConfigEdit) {
-        static const char* const labels[] = {"Device", "Region", "UTC min", "NTP", "Keymap", "BLE KB", "BLE Name", "BLE Addr"};
-        drawEditFields("Config", labels, 8, false);
+        static const char* const labels[] = {"Device",     "Region",   "UTC min",    "NTP",
+                                             "Keymap",     "BLE KB",   "BLE Name",   "BLE Addr",
+                                             "BLE Target", "BLE Scan", "BLE Pair",   "BLE Forget"};
+        drawEditFields("Config", labels, 12, false);
     } else if (screen == Screen::FontList) {
         drawFontList();
     }
@@ -4711,10 +4899,9 @@ void handleEditTouch(int, int y)
     uint8_t field = static_cast<uint8_t>((y - settingListTop()) / settingRowH());
     uint8_t maxField = editFieldCount();
     if (field < maxField) {
-        bool toggle = screen == Screen::ConfigEdit && (field == 4 || field == 5);
         editField = field;
         setEditCursorToEnd();
-        if (toggle) {
+        if (isChoiceEditField()) {
             toggleChoiceEditField();
         }
         dirty = true;
@@ -4807,6 +4994,10 @@ void editAppendChar(char c)
 
     const uint8_t maxField = editFieldCount();
     if (c == '\r' || c == '\n') {
+        if (isChoiceEditField()) {
+            toggleChoiceEditField();
+            return;
+        }
         saveEditingProfile();
         return;
     }
@@ -5276,7 +5467,7 @@ void serialPrintHelp()
     Serial.println("  scp put <sd-local> <remote> [profile-index]");
     Serial.println("  scp get user@host:/remote <sd-local> [password]");
     Serial.println("  scp put <sd-local> user@host:/remote [password]");
-    Serial.println("  ble status|enable|disable|scan|pair <index>|forget");
+    Serial.println("  ble status|devices|paired|enable|disable|scan|scanraw|list|disconnect [index|all]|type <own> <peer>|auth <none|bond|scbond>|force <on|off>|params <si> <sw> <min> <max> <lat> <to>|gaptest [index]|gapstatus|gapscan|gapauto|pair [index]|scanpair [index]|forget [index|all]");
     Serial.println("  python -c <statement>");
     Serial.println("  python <sd.py> [args...]");
     Serial.println("  python --reset");
@@ -5553,28 +5744,189 @@ void serialRunBleCommand(const String& command)
     lower.toLowerCase();
     if (lower == "ble status") {
         Serial.println(keyboard.bleStatus());
+    } else if (lower == "ble devices" || lower == "ble paired") {
+        Serial.println(String("OK ") + keyboard.bleDevicesStatus());
     } else if (lower == "ble enable" || lower == "ble disable") {
         config.keyboard.bleKeyboardEnabled = lower == "ble enable";
         keyboard.configure(config.keyboard);
         saveConfig();
         Serial.println(keyboard.bleStatus());
     } else if (lower == "ble scan") {
+        config.keyboard.bleKeyboardEnabled = true;
+        keyboard.configure(config.keyboard);
+        saveConfig();
         String result;
         bool ok = keyboard.bleScan(result);
         Serial.println(String(ok ? "OK " : "ERR ") + result);
-    } else if (lower.startsWith("ble pair ")) {
-        String indexText = lower.substring(strlen("ble pair "));
+        for (size_t i = 0; i < keyboard.bleScanCount(); ++i) {
+            Serial.println(String("ITEM ") + keyboard.bleScanEntry(i));
+        }
+    } else if (lower == "ble scanraw") {
+        config.keyboard.bleKeyboardEnabled = true;
+        keyboard.configure(config.keyboard);
+        saveConfig();
+        String result;
+        bool ok = keyboard.bleScanRaw(result);
+        Serial.println(String(ok ? "OK " : "ERR ") + result);
+    } else if (lower == "ble list") {
+        Serial.printf("OK count=%u\r\n", static_cast<unsigned>(keyboard.bleScanCount()));
+        for (size_t i = 0; i < keyboard.bleScanCount(); ++i) {
+            Serial.println(String("ITEM ") + keyboard.bleScanEntry(i));
+        }
+    } else if (lower == "ble disconnect" || lower.startsWith("ble disconnect ")) {
+        String arg = lower == "ble disconnect" ? "all" : lower.substring(strlen("ble disconnect "));
+        arg.trim();
+        String result;
+        bool ok = keyboard.bleDisconnect(arg == "all" ? -1 : arg.toInt(), result);
+        Serial.println(String(ok ? "OK " : "ERR ") + result);
+    } else if (lower.startsWith("ble type ")) {
+        String args = lower.substring(strlen("ble type "));
+        args.trim();
+        int space = args.indexOf(' ');
+        if (space < 0) {
+            Serial.println("ERR usage: ble type <own 0-3> <peer 0-3|255>");
+            return;
+        }
+        uint8_t ownType = static_cast<uint8_t>(args.substring(0, space).toInt());
+        uint8_t peerType = static_cast<uint8_t>(args.substring(space + 1).toInt());
+        keyboard.bleSetConnectTypes(ownType, peerType);
+        Serial.printf("OK ble type own=%u peer=%u\r\n", ownType, peerType);
+    } else if (lower.startsWith("ble auth ")) {
+        String mode = lower.substring(strlen("ble auth "));
+        mode.trim();
+        if (mode == "none") {
+            keyboard.bleSetSecurity(ESP_LE_AUTH_NO_BOND, false);
+            Serial.println("OK ble auth none force=off");
+        } else if (mode == "bond") {
+            keyboard.bleSetSecurity(ESP_LE_AUTH_BOND, false);
+            Serial.println("OK ble auth bond force=off");
+        } else if (mode == "scbond") {
+            keyboard.bleSetSecurity(ESP_LE_AUTH_REQ_SC_BOND, false);
+            Serial.println("OK ble auth scbond force=off");
+        } else {
+            Serial.println("ERR usage: ble auth <none|bond|scbond>");
+        }
+    } else if (lower.startsWith("ble force ")) {
+        String mode = lower.substring(strlen("ble force "));
+        mode.trim();
+        if (mode == "on") {
+            keyboard.bleSetSecurity(ESP_LE_AUTH_BOND, true);
+            Serial.println("OK ble force on auth=bond");
+        } else if (mode == "off") {
+            keyboard.bleSetSecurity(ESP_LE_AUTH_NO_BOND, false);
+            Serial.println("OK ble force off auth=none");
+        } else {
+            Serial.println("ERR usage: ble force <on|off>");
+        }
+    } else if (lower == "ble gaptest" || lower.startsWith("ble gaptest ")) {
+        String indexText = lower == "ble gaptest" ? "0" : lower.substring(strlen("ble gaptest "));
+        indexText.trim();
+        String result;
+        bool ok = keyboard.bleGapTest(static_cast<size_t>(indexText.toInt()), result);
+        Serial.println(String(ok ? "OK " : "ERR ") + result);
+    } else if (lower == "ble gapstatus") {
+        Serial.println(String("OK ") + keyboard.bleGapStatus());
+    } else if (lower == "ble gapclose") {
+        String result;
+        bool ok = keyboard.bleGapClose(result);
+        Serial.println(String(ok ? "OK " : "ERR ") + result);
+    } else if (lower == "ble gapsecure") {
+        String result;
+        bool ok = keyboard.bleGapSecure(result);
+        Serial.println(String(ok ? "OK " : "ERR ") + result);
+    } else if (lower == "ble gapservices") {
+        String result;
+        bool ok = keyboard.bleGapListServices(result);
+        Serial.println(String(ok ? "OK " : "ERR ") + result);
+    } else if (lower == "ble gaphid") {
+        String result;
+        bool ok = keyboard.bleGapSubscribeHid(result);
+        Serial.println(String(ok ? "OK " : "ERR ") + result);
+    } else if (lower.startsWith("ble params ")) {
+        String args = lower.substring(strlen("ble params "));
+        args.trim();
+        uint16_t values[6]{};
+        bool okArgs = true;
+        for (int i = 0; i < 6; ++i) {
+            int space = args.indexOf(' ');
+            String token = space < 0 ? args : args.substring(0, space);
+            token.trim();
+            if (!token.length()) {
+                okArgs = false;
+                break;
+            }
+            values[i] = static_cast<uint16_t>(token.toInt());
+            args = space < 0 ? "" : args.substring(space + 1);
+            args.trim();
+        }
+        if (!okArgs) {
+            Serial.println("ERR usage: ble params <scan_itvl> <scan_window> <min> <max> <latency> <timeout>");
+            return;
+        }
+        keyboard.bleSetGapParams(values[0], values[1], values[2], values[3], values[4], values[5]);
+        Serial.printf("OK ble params si=%u sw=%u min=%u max=%u lat=%u to=%u\r\n", values[0], values[1], values[2],
+                      values[3], values[4], values[5]);
+    } else if (lower == "ble gapscan") {
+        config.keyboard.bleKeyboardEnabled = true;
+        keyboard.configure(config.keyboard);
+        saveConfig();
+        String result;
+        bool ok = keyboard.bleGapScanAndTest(result);
+        Serial.println(String(ok ? "OK " : "ERR ") + result);
+    } else if (lower == "ble gapauto") {
+        config.keyboard.bleKeyboardEnabled = true;
+        keyboard.configure(config.keyboard);
+        saveConfig();
+        String result;
+        bool ok = keyboard.bleGapScanAndSubscribeHid(result);
+        if (ok) {
+            saveBlePairingFromKeyboard();
+        }
+        Serial.println(String(ok ? "OK " : "ERR ") + result);
+    } else if (lower == "ble arduinotest") {
+        config.keyboard.bleKeyboardEnabled = true;
+        keyboard.configure(config.keyboard);
+        saveConfig();
+        String result;
+        bool ok = keyboard.bleArduinoClientTest(result);
+        Serial.println(String(ok ? "OK " : "ERR ") + result);
+    } else if (lower == "ble pair" || lower.startsWith("ble pair ")) {
+        String indexText = lower == "ble pair" ? "0" : lower.substring(strlen("ble pair "));
         indexText.trim();
         String result;
         bool ok = keyboard.blePair(static_cast<size_t>(indexText.toInt()), result);
+        if (ok) {
+            saveBlePairingFromKeyboard();
+        }
         Serial.println(String(ok ? "OK " : "ERR ") + result);
+    } else if (lower == "ble scanpair" || lower.startsWith("ble scanpair ")) {
+        config.keyboard.bleKeyboardEnabled = true;
+        keyboard.configure(config.keyboard);
+        saveConfig();
+        String pairResult;
+        bool pairOk = keyboard.bleScanAndPairFirst(pairResult);
+        for (size_t i = 0; i < keyboard.bleScanCount(); ++i) {
+            Serial.println(String("ITEM ") + keyboard.bleScanEntry(i));
+        }
+        if (pairOk) {
+            saveBlePairingFromKeyboard();
+        }
+        Serial.println(String(pairOk ? "OK pair " : "ERR pair ") + pairResult);
     } else if (lower == "ble forget") {
         String result;
         bool ok = keyboard.bleForget(result);
-        config.keyboard.bleKeyboardName = "";
-        config.keyboard.bleKeyboardAddress = "";
+        removeBleDeviceConfig(-1, result);
         saveConfig();
         Serial.println(String(ok ? "OK " : "ERR ") + result);
+    } else if (lower.startsWith("ble forget ")) {
+        String arg = lower.substring(strlen("ble forget "));
+        arg.trim();
+        String disconnectResult;
+        bool disconnectOk = arg == "all" ? keyboard.bleDisconnect(-1, disconnectResult)
+                                         : keyboard.bleDisconnect(arg.toInt(), disconnectResult);
+        String result;
+        bool ok = removeBleDeviceConfig(arg == "all" ? -1 : arg.toInt(), result);
+        Serial.println(String((ok && disconnectOk) ? "OK " : "ERR ") + result + "; " + disconnectResult);
     } else {
         Serial.println("ERR usage");
     }
@@ -5800,8 +6152,7 @@ void handleSerialCommand(String command)
         Serial.println("OK");
     } else if (command.startsWith("scp ")) {
         serialRunScpCommand(command);
-    } else if (command == "ble status" || command == "ble enable" || command == "ble disable" ||
-               command == "ble scan" || command == "ble forget" || command.startsWith("ble pair ")) {
+    } else if (command == "ble" || command.startsWith("ble ")) {
         serialRunBleCommand(command);
     } else if (command == "python" || command == "python --reset" || command.startsWith("python -c ") ||
                command.startsWith("python ")) {
@@ -5881,35 +6232,37 @@ void setup()
     Serial.begin(115200);
     WiFi.onEvent(handleWifiEvent, ARDUINO_EVENT_WIFI_STA_DISCONNECTED);
     terminal.append("Tab5 CLI\n");
+    appendStatus("[boot] display ready");
     esp_reset_reason_t resetReason = esp_reset_reason();
-    appendStatus(String("Reset reason: ") + static_cast<int>(resetReason));
+    appendStatus(String("[boot] reset reason: ") + static_cast<int>(resetReason));
     if (crashStageMagic == 0x54414235 && strlen(crashStage)) {
-        appendStatus(String("Prev stage: ") + crashStage);
+        appendStatus(String("[boot] previous stage: ") + crashStage);
     }
 
     if (!settings.begin()) {
-        appendStatus(settings.lastError());
+        appendStatus(String("[boot] ") + settings.lastError());
     } else if (!settings.load(config)) {
-        appendStatus(settings.lastError());
+        appendStatus(String("[boot] ") + settings.lastError());
     } else {
         migrateLegacyLineStep();
         activeWifi = config.activeWifi;
         activeSsh = config.activeSsh;
-        appendStatus(String("Loaded profiles: Wi-Fi ") + config.wifi.size() + ", SSH " + config.ssh.size());
+        appendStatus(String("[boot] profiles loaded: Wi-Fi ") + config.wifi.size() + ", SSH " + config.ssh.size());
     }
 
     keyboard.configure(config.keyboard);
     keyboard.begin();
-    appendStatus(keyboard.status());
+    appendStatus(String("[boot] ") + keyboard.status());
     if (ensureSdReady()) {
-        appendStatus(String("SD ready: ") + formatBytes(SD.cardSize()));
+        appendStatus(String("[boot] SD ready: ") + formatBytes(SD.cardSize()));
     } else {
-        appendStatus(sdLastError);
+        appendStatus(String("[boot] ") + sdLastError);
     }
     configureTerminal();
 
     draw();
     setCrashStage("loop");
+    appendStatus("[boot] starting Wi-Fi reconnect");
     startWifiReconnect(20000);
 }
 

@@ -18,12 +18,22 @@ struct SshProfile {
     String terminal{"xterm-256color"};
 };
 
+struct BleHidProfile {
+    String name;
+    String address;
+    String kind{"keyboard"};
+    uint8_t addressType{1};
+    bool enabled{true};
+};
+
 struct KeyboardConfig {
     String layout{"us"};
     String terminalFont{"mono12"};
     uint8_t terminalLineStep{15};
     bool swapCtrlCaps{false};
     bool bleKeyboardEnabled{false};
+    std::vector<BleHidProfile> bleDevices;
+    size_t activeBle{0};
     String bleKeyboardName;
     String bleKeyboardAddress;
 };
