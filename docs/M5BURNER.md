@@ -22,6 +22,7 @@ The script builds the firmware and LittleFS image, then creates:
 dist/m5burner/Tab5_SSH_Client-<version>/
   README.md
   m5burner.json
+  manifest.json
   firmware/
     bootloader_0x2000.bin
     partitions_0x8000.bin
@@ -41,6 +42,16 @@ The flash offsets come from the ESP32-P4 PlatformIO/Arduino build:
 ```
 
 ## Publish from M5Burner
+
+For the public M5Burner flow, prefer exporting a clean image from the device.
+Flash the Tab5 with the public dummy profiles first:
+
+```powershell
+.\tools\flash_tab5.ps1 -Port COM4 -UseLocalProfiles:$false -EraseFirst
+```
+
+Then open M5Burner and use the firmware export flow. The exported `.bin` is the
+file to upload in the `FirmWare` field.
 
 ## Release History
 
@@ -79,11 +90,14 @@ and an M5GFX-backed graphics API for Python demos.
 ## Notes
 
 - M5Burner also has a built-in firmware export flow. The official docs recommend
-  that flow for the `FirmWare` field, but the generated zip follows the public
-  `m5burner.json` package format used by M5Stack's firmware repository.
+  that flow for the `FirmWare` field. The generated zip includes both
+  `m5burner.json`, used by M5Stack's firmware repository format, and
+  `manifest.json`, accepted by newer M5Burner upload flows.
 - If M5Burner rejects the zip, burn the firmware once with PlatformIO, then use
   M5Burner's `USER CUSTOM > Firmware Exporter` and upload the exported firmware
   file through `USER CUSTOM > Publish`.
+- For local development, `.\tools\flash_tab5.ps1 -Port COM4` can write the
+  ignored `data/profiles.local.json` into LittleFS without committing secrets.
 - For a first-time listing in the public M5Burner catalog, M5Stack may review the
   firmware. The GitHub repository format can also be submitted to
   `m5stack/M5Stack-Firmware` by adding this repository to `firmware-repo.list`.

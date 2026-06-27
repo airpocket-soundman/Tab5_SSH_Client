@@ -29,6 +29,7 @@ PlatformIO、対象は Tab5、Tab5 Keyboard、microSD、Wi-Fi です。
 - [Python and graphics](docs/PYTHON.md)
 - [Demo scripts](docs/DEMOS.md)
 - [デモスクリプト](docs/DEMOS.ja.md)
+- [Third-party licenses](THIRD_PARTY_LICENSES.md)
 
 ## 必要なハードウェア
 
@@ -56,6 +57,21 @@ $env:PYTHONUTF8='1'; pio run -e tab5
 
 ```powershell
 pio run -e tab5 -t upload
+```
+
+bootloader、partition table、firmware、LittleFSプロファイルを含めて完全に書き込む場合は
+次を使います。
+
+```powershell
+.\tools\flash_tab5.ps1 -Port COM4
+```
+
+`data/profiles.local.json` がある場合、このコマンドはGit管理外のローカルプロファイルを
+一時的にLittleFSへ入れて書き込み、最後に公開用の `data/profiles.json` へ戻します。
+M5Burner Export用のクリーンなイメージを書き込む場合は次を使います。
+
+```powershell
+.\tools\flash_tab5.ps1 -Port COM4 -UseLocalProfiles:$false -EraseFirst
 ```
 
 ## 設定
@@ -188,3 +204,10 @@ tools/      補助スクリプト
 Tab5ハードウェア立ち上げとモバイルSSH用途の実験的ファームウェアです。Wi-Fi挙動、
 ターミナルエスケープ処理、性能、フォント、キーボードマッピングは利用環境に合わせて
 調整してください。
+
+## ライセンス
+
+このリポジトリの自作部分は [MIT License](LICENSE) で配布します。
+サードパーティライブラリ、フレームワーク、フォントはそれぞれのライセンスに従います。
+詳細は [THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md) を参照してください。
+特にSSH/SCP機能は `LibSSH-ESP32` / `libssh` を使用しており、LGPL-2.1-or-later の条件を受けます。

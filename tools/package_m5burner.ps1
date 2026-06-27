@@ -56,7 +56,9 @@ try {
         framework = "Arduino"
     }
 
-    $metadata | ConvertTo-Json -Depth 8 | Set-Content -Path (Join-Path $packageRoot "m5burner.json") -Encoding UTF8
+    $metadataJson = $metadata | ConvertTo-Json -Depth 8
+    $metadataJson | Set-Content -Path (Join-Path $packageRoot "m5burner.json") -Encoding UTF8
+    $metadataJson | Set-Content -Path (Join-Path $packageRoot "manifest.json") -Encoding UTF8
 
     Compress-Archive -Path (Join-Path $packageRoot "*") -DestinationPath $zipPath -Force
 

@@ -30,6 +30,7 @@ Wi-Fi.
 - [Python and graphics](docs/PYTHON.md)
 - [Demo scripts](docs/DEMOS.md)
 - [デモスクリプト](docs/DEMOS.ja.md)
+- [Third-party licenses](THIRD_PARTY_LICENSES.md)
 
 ## Hardware
 
@@ -57,6 +58,21 @@ Upload firmware:
 
 ```powershell
 pio run -e tab5 -t upload
+```
+
+For a complete device flash, including bootloader, partition table, firmware,
+and LittleFS profiles, use:
+
+```powershell
+.\tools\flash_tab5.ps1 -Port COM4
+```
+
+If `data/profiles.local.json` exists, this command temporarily uses that ignored
+local profile file for the LittleFS image, then restores the public
+`data/profiles.json`. For a clean public image for M5Burner export:
+
+```powershell
+.\tools\flash_tab5.ps1 -Port COM4 -UseLocalProfiles:$false -EraseFirst
 ```
 
 ## Configuration
@@ -189,3 +205,10 @@ tools/      Helper scripts
 This is experimental firmware for Tab5 hardware bring-up and mobile SSH use.
 Expect to tune Wi-Fi behavior, terminal escape handling, performance, fonts,
 and keyboard mappings for your own setup.
+
+## License
+
+Project-owned source code is distributed under the [MIT License](LICENSE).
+Third-party components remain under their own licenses; see
+[THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md). In particular, SSH/SCP
+support uses `LibSSH-ESP32` / `libssh`, which is LGPL-2.1-or-later.
