@@ -60,8 +60,37 @@ bool SettingsStore::load(AppConfig& config)
     config.keyboard.terminalLineStep = doc["keyboard"]["terminalLineStep"] | 15;
     config.keyboard.swapCtrlCaps = doc["keyboard"]["swapCtrlCaps"] | false;
     config.keyboard.bleKeyboardEnabled = doc["keyboard"]["bleKeyboardEnabled"] | false;
-    config.keyboard.bleKeyboardName = doc["keyboard"]["bleKeyboardName"] | "";
-    config.keyboard.bleKeyboardAddress = doc["keyboard"]["bleKeyboardAddress"] | "";
+    JsonArrayConst savedBleDevices = doc["keyboard"]["bleDevices"].as<JsonArrayConst>();
+    for (JsonObjectConst item : savedBleDevices) {
+        BleHidProfile profile;
+        profile.name = item["name"] | "";
+        profile.address = item["address"] | "";
+        profile.kind = item["kind"] | "keyboard";
+        profile.addressType = item["addressType"] | 1;
+        profile.enabled = item["enabled"] | true;
+        if (profile.address.length()) {
+            config.keyboard.bleDevices.push_back(profile);
+        }
+    }
+    const String legacyBleAddress = doc["keyboard"]["bleKeyboardAddress"] | "";
+    if (!config.keyboard.bleDevices.size() && legacyBleAddress.length()) {
+        BleHidProfile profile;
+        profile.name = doc["keyboard"]["bleKeyboardName"] | "BLE keyboard";
+        profile.address = legacyBleAddress;
+        profile.kind = "keyboard";
+        profile.addressType = doc["keyboard"]["bleKeyboardAddressType"] | 1;
+        profile.enabled = true;
+        config.keyboard.bleDevices.push_back(profile);
+    }
+    config.keyboard.activeBle = doc["keyboard"]["activeBle"] | 0;
+    if (config.keyboard.activeBle >= config.keyboard.bleDevices.size()) {
+        config.keyboard.activeBle = 0;
+    }
+    if (config.keyboard.bleDevices.size()) {
+        const auto& active = config.keyboard.bleDevices[config.keyboard.activeBle];
+        config.keyboard.bleKeyboardName = active.name;
+        config.keyboard.bleKeyboardAddress = active.address;
+    }
     config.system.deviceName = doc["system"]["deviceName"] | "tab5";
     config.system.region = doc["system"]["region"] | "Asia/Tokyo";
     config.system.utcOffsetMinutes = doc["system"]["utcOffsetMinutes"] | 540;
@@ -104,8 +133,16 @@ bool SettingsStore::save(const AppConfig& config)
     doc["keyboard"]["terminalLineStep"] = config.keyboard.terminalLineStep;
     doc["keyboard"]["swapCtrlCaps"] = config.keyboard.swapCtrlCaps;
     doc["keyboard"]["bleKeyboardEnabled"] = config.keyboard.bleKeyboardEnabled;
-    doc["keyboard"]["bleKeyboardName"] = config.keyboard.bleKeyboardName;
-    doc["keyboard"]["bleKeyboardAddress"] = config.keyboard.bleKeyboardAddress;
+    JsonArray bleDevices = doc["keyboard"]["bleDevices"].to<JsonArray>();
+    for (const auto& profile : config.keyboard.bleDevices) {
+        JsonObject item = bleDevices.add<JsonObject>();
+        item["name"] = profile.name;
+        item["address"] = profile.address;
+        item["kind"] = profile.kind;
+        item["addressType"] = profile.addressType;
+        item["enabled"] = profile.enabled;
+    }
+    doc["keyboard"]["activeBle"] = config.keyboard.activeBle;
     doc["system"]["deviceName"] = config.system.deviceName;
     doc["system"]["region"] = config.system.region;
     doc["system"]["utcOffsetMinutes"] = config.system.utcOffsetMinutes;

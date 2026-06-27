@@ -138,11 +138,15 @@ cat /life.txt
 | Command | Description | Example |
 | --- | --- | --- |
 | `ble status` | Show BLE keyboard state. | `ble status` |
+| `ble devices` | Show saved BLE HID devices and active runtime connections. | `ble devices` |
+| `ble gapstatus` | Show low-level BLE GAP/GATT/HID connection state. | `ble gapstatus` |
 | `ble enable` | Enable BLE keyboard support. | `ble enable` |
 | `ble disable` | Disable BLE keyboard support. | `ble disable` |
 | `ble scan` | Scan for BLE keyboard candidates. | `ble scan` |
 | `ble pair <index>` | Pair with a scanned keyboard. | `ble pair 0` |
-| `ble forget` | Forget stored BLE keyboard pairing state. | `ble forget` |
+| `ble gapauto` | Scan, connect, subscribe HID input, and store the first usable BLE HID keyboard. | `ble gapauto` |
+| `ble disconnect [index\|all]` | Disconnect one saved BLE HID device or all active BLE HID devices. | `ble disconnect all` |
+| `ble forget [index\|all]` | Forget one saved BLE HID device or all stored BLE HID devices. | `ble forget 0` |
 
 ## Notes
 

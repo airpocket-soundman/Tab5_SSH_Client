@@ -16,6 +16,7 @@ public:
     void scroll(int delta);
     void scrollToBottom();
     String lineAt(size_t viewportRow) const;
+    size_t inputViewportRow() const;
     size_t viewportRows() const { return _rows; }
     bool atBottom() const;
 

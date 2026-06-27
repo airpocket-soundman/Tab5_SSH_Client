@@ -126,16 +126,10 @@ String TerminalBuffer::lineAt(size_t viewportRow) const
         return "";
     }
 
-    const size_t visible = min(_rows, total);
-    const size_t blankTop = _rows - visible;
-    if (viewportRow < blankTop) {
-        return "";
-    }
-
     const size_t maxOffset = total > _rows ? total - _rows : 0;
     const size_t offset = min(_scrollOffset, maxOffset);
     const size_t firstIndex = total > _rows ? total - _rows - offset : 0;
-    const size_t index = firstIndex + viewportRow - blankTop;
+    const size_t index = firstIndex + viewportRow;
     if (index < _lines.size()) {
         return _lines[index];
     }
@@ -143,6 +137,15 @@ String TerminalBuffer::lineAt(size_t viewportRow) const
         return _current;
     }
     return "";
+}
+
+size_t TerminalBuffer::inputViewportRow() const
+{
+    const size_t total = _lines.size() + 1;
+    if (_rows == 0) {
+        return 0;
+    }
+    return total <= _rows ? total - 1 : _rows - 1;
 }
 
 bool TerminalBuffer::atBottom() const
